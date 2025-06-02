@@ -1,15 +1,33 @@
 import os
+import telebot
+from telebot import types
 from datetime import datetime
+import time
+from dotenv import load_dotenv
 
+# --- Загрузка переменных окружения ---
+load_dotenv()
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+PASSWORD = os.getenv("BOT_PASSWORD")
+
+bot = telebot.TeleBot(TOKEN)
+
+# --- Конфигурация ---
+AUDIO_DIR = "audio_files"
+SCHEDULE_FILE = "schedule.txt"
+os.makedirs(AUDIO_DIR, exist_ok=True)
+
+# --- Глобальные переменные ---
+user_data = {}  # Временное хранилище данных
+authorized_users = {}  # Словарь авторизованных пользователей
+
+# --- Классы и функции ---
 class LessonEvent:
-    def __init__(self, lesson_number, event_type, time, sound_file):
+    def __init__(self, lesson_number, event_type, time, audio_file):
         self.lesson_number = lesson_number
         self.event_type = event_type  # 'start' или 'end'
         self.time = time  # Время в формате "hh:mm"
-        self.sound_file = sound_file
-    
-    def __repr__(self):
-        return f"{self.event_type} {self.lesson_number} {self.time} {self.sound_file}"
+        self.audio_file = audio_file  # Имя аудиофайла
 
 def validate_time(time_str):
     try:
@@ -22,50 +40,13 @@ def time_to_minutes(time_str):
     h, m = map(int, time_str.split(':'))
     return h * 60 + m
 
-def collect_events():
-    events = []
-    print("Введите данные о уроках. Для завершения введите 'q'")
-    
-    while True:
-        lesson_num = input("\nНомер урока (1-99): ").strip()
-        if lesson_num.lower() == 'q':
-            break
-        
-        if not lesson_num.isdigit() or not 1 <= int(lesson_num) <= 99:
-            print("Ошибка: номер урока должен быть числом от 1 до 99")
-            continue
-        
-        print(f"\nУрок {lesson_num} - начало:")
-        start_time = input("Время начала (hh:mm): ").strip()
-        if not validate_time(start_time):
-            print("Некорректный формат времени. Используйте hh:mm")
-            continue
-        
-        start_file = input("Путь к звуковому файлу для начала: ").strip()
-        if not os.path.exists(os.path.expanduser(start_file)):
-            print(f"Файл {start_file} не существует!")
-            continue
-        
-        print(f"\nУрок {lesson_num} - конец:")
-        end_time = input("Время окончания (hh:mm): ").strip()
-        if not validate_time(end_time):
-            print("Некорректный формат времени. Используйте hh:mm")
-            continue
-        
-        if time_to_minutes(end_time) <= time_to_minutes(start_time):
-            print("Ошибка: время окончания должно быть позже времени начала")
-            continue
-        
-        end_file = input("Путь к звуковому файлу для окончания: ").strip()
-        if not os.path.exists(os.path.expanduser(end_file)):
-            print(f"Файл {end_file} не существует!")
-            continue
-        
-        events.append(LessonEvent(lesson_num, "start", start_time, start_file))
-        events.append(LessonEvent(lesson_num, "end", end_time, end_file))
-        print(f"Урок {lesson_num} успешно добавлен!")
-    
-    return events
+def save_audio_file(file_id, file_name):
+    file_info = bot.get_file(file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
+    save_path = os.path.join(AUDIO_DIR, file_name)
+    with open(save_path, 'wb') as new_file:
+        new_file.write(downloaded_file)
+    return save_path
 
 def validate_events(events):
     if not events:
@@ -75,14 +56,13 @@ def validate_events(events):
     for num in lesson_numbers:
         starts = [e for e in events if e.lesson_number == num and e.event_type == "start"]
         ends = [e for e in events if e.lesson_number == num and e.event_type == "end"]
-        
         if len(starts) != 1 or len(ends) != 1:
             return False, f"Для урока {num} должно быть ровно одно начало и один конец"
     
     sorted_events = sorted(events, key=lambda x: (int(x.lesson_number), x.event_type))
-    
     prev_end_time = 0
     prev_lesson = 0
+    
     for ev in sorted_events:
         current_time = time_to_minutes(ev.time)
         current_lesson = int(ev.lesson_number)
@@ -103,80 +83,217 @@ def validate_events(events):
     
     return True, "Проверка пройдена успешно"
 
-def save_events_to_file(events, filename):
+def save_schedule_to_file(events):
     try:
-        with open(filename, 'w', encoding='utf-8') as f:
+        with open(SCHEDULE_FILE, 'w', encoding='utf-8') as f:
             for ev in sorted(events, key=lambda x: (int(x.lesson_number), x.event_type)):
-                line = f"{ev.event_type} {ev.lesson_number} {ev.time} {ev.sound_file}\n"
+                line = f"{ev.event_type} {ev.lesson_number} {ev.time} {ev.audio_file}\n"
                 f.write(line)
-        print(f"\nДанные успешно сохранены в файл {filename}")
         return True
     except Exception as e:
-        print(f"\nОшибка при сохранении файла: {str(e)}")
+        print(f"Ошибка при сохранении файла: {str(e)}")
         return False
 
-def print_schedule(filename):
-    if not os.path.exists(filename):
-        print(f"Файл {filename} не существует!")
-        return
+def load_schedule_from_file():
+    if not os.path.exists(SCHEDULE_FILE):
+        return []
     
+    events = []
     try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            print("\nТекущее расписание:")
-            print("="*50)
-            print(f"{'Урок':<6}{'Тип':<8}{'Время':<8}{'Звуковой файл'}")
-            print("-"*50)
-            
+        with open(SCHEDULE_FILE, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-                
                 parts = line.split(maxsplit=3)
                 if len(parts) != 4:
                     continue
-                
-                event_type, lesson_num, time, sound_file = parts
-                event_type_ru = "Начало" if event_type == "start" else "Конец "
-                print(f"{lesson_num:<6}{event_type_ru:<8}{time:<8}{sound_file}")
-            
-            print("="*50)
+                event_type, lesson_num, time, audio_file = parts
+                events.append(LessonEvent(lesson_num, event_type, time, audio_file))
     except Exception as e:
         print(f"Ошибка при чтении файла: {str(e)}")
+    return events
 
-def main():
-    print("Программа составления расписания уроков\n")
-    schedule_file = "schedule.txt"
+def format_schedule(events):
+    if not events:
+        return "📭 Расписание пусто."
     
-    while True:
-        print("\nМеню:")
-        print("1. Добавить новое расписание")
-        print("2. Показать текущее расписание")
-        print("3. Выход")
-        
-        choice = input("Выберите действие (1-3): ").strip()
-        
-        if choice == '1':
-            events = collect_events()
-            if not events:
-                print("Не введено ни одного урока.")
-                continue
-            
-            is_valid, message = validate_events(events)
-            print(f"\nРезультат проверки: {message}")
-            
-            if is_valid:
-                save_events_to_file(events, schedule_file)
-        
-        elif choice == '2':
-            print_schedule(schedule_file)
-        
-        elif choice == '3':
-            print("Выход из программы.")
-            break
-        
-        else:
-            print("Некорректный выбор. Попробуйте снова.")
+    sorted_events = sorted(events, key=lambda x: (int(x.lesson_number), x.event_type))
+    result = "📅 Текущее расписание:\n\n"
+    current_lesson = None
+    
+    for ev in sorted_events:
+        if ev.lesson_number != current_lesson:
+            result += f"🔔 Урок {ev.lesson_number}:\n"
+            current_lesson = ev.lesson_number
+        event_type = "🟢 Начало" if ev.event_type == "start" else "🔴 Конец"
+        result += f"{event_type} в {ev.time}\n"
+    return result
 
+# --- Обработчики команд ---
+@bot.message_handler(commands=['start'])
+def ask_password(message):
+    bot.send_message(message.chat.id, "🔒 Введите пароль для доступа к боту:")
+    bot.register_next_step_handler(message, check_password)
+
+def check_password(message):
+    if message.text == PASSWORD:
+        authorized_users[message.chat.id] = True
+        bot.send_message(
+            message.chat.id,
+            "✅ Пароль верный! Теперь вы можете использовать бота.\n\n"
+            "Доступные команды:\n"
+            "/add_lesson - Добавить урок\n"
+            "/show_schedule - Показать расписание\n"
+            "/help - Справка"
+        )
+    else:
+        bot.send_message(message.chat.id, "❌ Неверный пароль! Попробуйте снова /start")
+
+@bot.message_handler(commands=['help'])
+def show_help(message):
+    if message.chat.id not in authorized_users:
+        bot.send_message(message.chat.id, "❌ Сначала введите пароль! /start")
+        return
+    bot.send_message(
+        message.chat.id,
+        "📌 Помощь по командам:\n\n"
+        "/add_lesson - Добавить новый урок\n"
+        "/show_schedule - Показать текущее расписание\n"
+        "/help - Эта справка"
+    )
+
+@bot.message_handler(commands=['add_lesson'])
+def start_adding_lesson(message):
+    if message.chat.id not in authorized_users:
+        bot.send_message(message.chat.id, "❌ Сначала введите пароль! /start")
+        return
+    msg = bot.send_message(message.chat.id, "Введите номер урока (1-99):")
+    bot.register_next_step_handler(msg, process_lesson_number)
+
+def process_lesson_number(message):
+    try:
+        lesson_num = message.text.strip()
+        if not lesson_num.isdigit() or not 1 <= int(lesson_num) <= 99:
+            bot.send_message(message.chat.id, "❌ Номер урока должен быть числом от 1 до 99")
+            return
+        user_data[message.chat.id] = {'lesson_num': lesson_num}
+        msg = bot.send_message(message.chat.id, f"Урок {lesson_num} - начало:\nВведите время начала (hh:mm):")
+        bot.register_next_step_handler(msg, process_start_time)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ Ошибка: {str(e)}")
+
+def process_start_time(message):
+    try:
+        start_time = message.text.strip()
+        if not validate_time(start_time):
+            bot.send_message(message.chat.id, "❌ Некорректный формат времени. Используйте hh:mm")
+            return
+        user_data[message.chat.id]['start_time'] = start_time
+        msg = bot.send_message(
+            message.chat.id,
+            f"Урок {user_data[message.chat.id]['lesson_num']} - начало в {start_time}\n"
+            "Отправьте аудиофайл для начала урока:"
+        )
+        bot.register_next_step_handler(msg, process_start_audio)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ Ошибка: {str(e)}")
+
+def process_start_audio(message):
+    try:
+        if not (message.audio or message.voice):
+            bot.send_message(message.chat.id, "❌ Отправьте аудиофайл или голосовое сообщение!")
+            return
+        file_id = message.voice.file_id if message.voice else message.audio.file_id
+        file_name = f"lesson_{user_data[message.chat.id]['lesson_num']}_start_{int(time.time())}.ogg"
+        save_audio_file(file_id, file_name)
+        user_data[message.chat.id]['start_audio'] = file_name
+        msg = bot.send_message(
+            message.chat.id,
+            f"Урок {user_data[message.chat.id]['lesson_num']} - конец:\nВведите время окончания (hh:mm):"
+        )
+        bot.register_next_step_handler(msg, process_end_time)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ Ошибка: {str(e)}")
+
+def process_end_time(message):
+    try:
+        end_time = message.text.strip()
+        if not validate_time(end_time):
+            bot.send_message(message.chat.id, "❌ Некорректный формат времени. Используйте hh:mm")
+            return
+        start_time = user_data[message.chat.id]['start_time']
+        if time_to_minutes(end_time) <= time_to_minutes(start_time):
+            bot.send_message(message.chat.id, "❌ Время окончания должно быть позже времени начала!")
+            return
+        user_data[message.chat.id]['end_time'] = end_time
+        msg = bot.send_message(
+            message.chat.id,
+            f"Урок {user_data[message.chat.id]['lesson_num']} - конец в {end_time}\n"
+            "Отправьте аудиофайл для окончания урока:"
+        )
+        bot.register_next_step_handler(msg, process_end_audio)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ Ошибка: {str(e)}")
+
+def process_end_audio(message):
+    try:
+        if not (message.audio or message.voice):
+            bot.send_message(message.chat.id, "❌ Отправьте аудиофайл или голосовое сообщение!")
+            return
+        file_id = message.voice.file_id if message.voice else message.audio.file_id
+        file_name = f"lesson_{user_data[message.chat.id]['lesson_num']}_end_{int(time.time())}.ogg"
+        save_audio_file(file_id, file_name)
+        
+        # Создаем события
+        lesson_num = user_data[message.chat.id]['lesson_num']
+        start_event = LessonEvent(
+            lesson_num,
+            'start',
+            user_data[message.chat.id]['start_time'],
+            user_data[message.chat.id]['start_audio']
+        )
+        end_event = LessonEvent(
+            lesson_num,
+            'end',
+            user_data[message.chat.id]['end_time'],
+            file_name
+        )
+        
+        # Загружаем и проверяем расписание
+        events = load_schedule_from_file()
+        events.extend([start_event, end_event])
+        is_valid, msg_text = validate_events(events)
+        
+        if not is_valid:
+            bot.send_message(message.chat.id, f"❌ Ошибка: {msg_text}")
+            return
+        
+        if save_schedule_to_file(events):
+            bot.send_message(
+                message.chat.id,
+                f"✅ Урок {lesson_num} успешно добавлен!\n\n"
+                f"🟢 Начало: {start_event.time}\n"
+                f"🔴 Конец: {end_event.time}"
+            )
+        else:
+            bot.send_message(message.chat.id, "❌ Ошибка при сохранении расписания")
+        
+        # Очищаем временные данные
+        if message.chat.id in user_data:
+            del user_data[message.chat.id]
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ Ошибка: {str(e)}")
+
+@bot.message_handler(commands=['show_schedule'])
+def show_schedule(message):
+    if message.chat.id not in authorized_users:
+        bot.send_message(message.chat.id, "❌ Сначала введите пароль! /start")
+        return
+    events = load_schedule_from_file()
+    bot.send_message(message.chat.id, format_schedule(events))
+
+# --- Запуск бота ---
 if __name__ == "__main__":
-    main()
+    print("Бот запущен...")
+    bot.infinity_polling()
