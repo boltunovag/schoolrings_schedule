@@ -1,0 +1,10 @@
+# Аудио расписание
+
+36 10 * * 1-5 /usr/bin/mpg123 'audio_files/lesson_1_start_1750318552.mp3' >/dev/null 2>&1
+12 12 * * 1-5 /usr/bin/mpg123 'audio_files/lesson_11_start_1748592708.mp3' >/dev/null 2>&1
+14 12 * * 1-5 /usr/bin/mpg123 'audio_files/lesson_12_start_1748592779.mp3' >/dev/null 2>&1
+41 10 * * 1-5 /usr/bin/mpg123 'audio_files/lesson_2_start_1750318788.mp3' >/dev/null 2>&1
+37 10 * * 1-5 /usr/bin/mpg123 'audio_files/lesson_1_end_1750318582.mp3' >/dev/null 2>&1
+13 12 * * 1-5 /usr/bin/mpg123 'audio_files/lesson_11_end_1748592737.mp3' >/dev/null 2>&1
+15 12 * * 1-5 /usr/bin/mpg123 'audio_files/lesson_12_end_1748592820.mp3' >/dev/null 2>&1
+40 10 * * 1-5 /usr/bin/mpg123 'audio_files/lesson_2_end_1750318823.mp3' >/dev/null 2>&1

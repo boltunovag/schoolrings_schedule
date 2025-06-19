@@ -40,13 +40,35 @@ def load_events():
         print(f"Ошибка загрузки: {str(e)}")
     return events
 
-def save_events(events):
-    """Сохраняет события в файл"""
-    with open(SCHEDULE_FILE, 'w') as f:
-        for event in events:
-            line = f"{event.event_type} {event.lesson_num} {event.time} {event.audio_file}\n"
-            f.write(line)
 
+def save_events(events):
+    """Сохраняет события в файл, обновляя существующие уроки"""
+    # Создаем словарь для хранения последних версий событий
+    lesson_records = {}
+    
+    # Группируем события по номеру урока и типу
+    for event in events:
+        key = (event.lesson_num, event.event_type)
+        lesson_records[key] = event
+    
+    # Записываем в файл, сохраняя порядок уроков
+    with open(SCHEDULE_FILE, 'w') as f:
+        # Сначала записываем все начала уроков
+        for key in sorted(lesson_records.keys()):
+            if key[1] == 'start':
+                event = lesson_records[key]
+                line = f"{event.event_type} {event.lesson_num} {event.time} {event.audio_file}\n"
+                f.write(line)
+        
+        # Затем записываем все окончания уроков
+        for key in sorted(lesson_records.keys()):
+            if key[1] == 'end':
+                event = lesson_records[key]
+                line = f"{event.event_type} {event.lesson_num} {event.time} {event.audio_file}\n"
+                f.write(line)
+
+        
+# --- Ненужная функция. Будет удалена
 def clear_schedule():
     """Полностью очищает расписание"""
     try:
@@ -61,15 +83,31 @@ def clear_schedule():
         return False
 
 # --- Работа с cron ---
-def generate_cron_content(events):
-    """Генерирует содержимое cron-файла"""
-    content = "# Аудио расписание\n\n"
-    for event in events:
-#        if event.event_type == "start":
-        hour, minute = event.time.split(':')
-        audio_path = os.path.join(AUDIO_DIR, event.audio_file)
-        content += f"{minute} {hour} * * 1-5 /usr/bin/mpg123 '{audio_path}' >/dev/null 2>&1\n"
-    return content
+def generate_cron_jobs(events):
+    """Генерирует crontab с абсолютными путями"""
+    if not os.path.exists(AUDIO_DIR):
+        os.makedirs(AUDIO_DIR, exist_ok=True)
+    
+    cron_content = "# Аудио расписание\n\n"
+    cron_content += f"# Audio dir: {AUDIO_DIR}\n\n"
+    
+    for event in sorted(events, key=lambda x: x.time):
+        try:
+            audio_path = os.path.join(AUDIO_DIR, event.audio_file)
+            if not os.path.exists(audio_path):
+                raise FileNotFoundError(f"Audio file {audio_path} not found")
+            
+            hour, minute = event.time.split(':')
+            cron_content += (
+                f"{minute} {hour} * * 1-5 "
+                f"/usr/bin/mpg123 '{audio_path}' "
+                f">>{AUDIO_DIR}/cron.log 2>&1\n"
+            )
+        except Exception as e:
+            print(f"Error processing event {event.lesson_num}: {str(e)}")
+            continue
+    
+    return cron_content
 
 def install_cron_jobs():
     """Устанавливает задания в crontab"""
@@ -120,12 +158,11 @@ def show_schedule(message):
         response += f"Урок {event.lesson_num}: {'Начало' if event.event_type == 'start' else 'Конец'} в {event.time}\n"
     bot.send_message(message.chat.id, response)
 
-@bot.message_handler(commands=['clear'])
-def handle_clear(message):
+_unused='''@bot.message_handler(commands=['clear'])
     if clear_schedule():
         bot.send_message(message.chat.id, "✅ Расписание и crontab очищены")
     else:
-        bot.send_message(message.chat.id, "❌ Ошибка при очистке")
+        bot.send_message(message.chat.id, "❌ Ошибка при очистке")'''
 
 @bot.message_handler(commands=['install_cron'])
 def handle_install_cron(message):
