@@ -12,6 +12,8 @@ bot = telebot.TeleBot(TOKEN)
 AUDIO_DIR = "audio_files"
 SCHEDULE_FILE = "schedule.txt"
 CRON_FILE = "audio_schedule.cron"
+SETTINGS_FILE = "settings.json"          # Новый файл для настроек
+CRON_BACKUP_FILE = "cron_backup.txt"     # Резервная копия cron
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # --- Класс для событий ---
@@ -77,6 +79,26 @@ def save_events(events):
                 line = f"{event.event_type} {event.lesson_num} {event.time} {event.audio_file}\n"
                 f.write(line)
 
+
+# --- Работа с настройками ---
+def load_settings():
+    """Загружает настройки из файла"""
+    default_settings = {
+        "lesson_duration": 45,  # по умолчанию 45 минут
+        "cron_paused": False
+    }
+    try:
+        with open(SETTINGS_FILE, 'r') as f:
+            import json
+            return {**default_settings, **json.load(f)}
+    except:
+        return default_settings
+
+def save_settings(settings):
+    """Сохраняет настройки в файл"""
+    with open(SETTINGS_FILE, 'w') as f:
+        import json
+        json.dump(settings, f)
         
 # --- Ненужная функция. Будет удалена
 def clear_schedule():
@@ -143,14 +165,18 @@ def install_cron_jobs():
         return False, f"Ошибка: {str(e)}"
 
 # --- Команды бота ---
+
 @bot.message_handler(commands=['start'])
 def start(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    btn1 = types.KeyboardButton('/add_lesson')
-    btn2 = types.KeyboardButton('/show_schedule')
-    btn3 = types.KeyboardButton('/install_cron')
-    btn4 = types.KeyboardButton('/clear')
-    markup.add(btn1, btn2, btn3, btn4)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [
+        types.KeyboardButton('/add_lesson'),
+        types.KeyboardButton('/show_schedule'),
+        types.KeyboardButton('/install_cron'),
+        types.KeyboardButton('/clear'),
+        types.KeyboardButton('/settings')  # Новая кнопка
+    ]
+    markup.add(*buttons)
     
     bot.send_message(
         message.chat.id,
@@ -159,7 +185,8 @@ def start(message):
         "/add_lesson - добавить урок\n"
         "/show_schedule - показать расписание\n"
         "/install_cron - установить cron\n"
-        "/clear - очистить расписание",
+        "/clear - очистить расписание\n"
+        "/settings - настройки",
         reply_markup=markup
     )
 
@@ -350,6 +377,92 @@ def process_end_audio(message, lesson_num, end_time, events):
     except Exception as e:
         bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
         start(message)
+        
+"""Новый код"""
+# --- Меню настроек ---
+@bot.message_handler(commands=['settings'])
+def settings_menu(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    buttons = [
+        types.KeyboardButton('1. Продолжительность урока'),
+        types.KeyboardButton('2. Приостановить звонки'),
+        types.KeyboardButton('3. Запустить звонки'),
+        types.KeyboardButton('/start')
+    ]
+    markup.add(*buttons)
+    
+    settings = load_settings()
+    status = "приостановлены" if settings["cron_paused"] else "активны"
+    
+    bot.send_message(
+        message.chat.id,
+        f"⚙️ Настройки:\n\n"
+        f"1. Текущая продолжительность урока: {settings['lesson_duration']} мин\n"
+        f"2. Статус звонков: {status}\n\n"
+        f"Выберите действие:",
+        reply_markup=markup
+    )
+
+# Обработчики пунктов меню настроек
+@bot.message_handler(func=lambda message: message.text == '1. Продолжительность урока')
+def set_lesson_duration(message):
+    msg = bot.send_message(message.chat.id, "Сколько минут длится урок? (Введите число от 1 до 120):")
+    bot.register_next_step_handler(msg, process_lesson_duration)
+
+def process_lesson_duration(message):
+    try:
+        duration = int(message.text)
+        if not 1 <= duration <= 120:
+            raise ValueError("Длительность должна быть от 1 до 120 минут")
+            
+        settings = load_settings()
+        settings["lesson_duration"] = duration
+        save_settings(settings)
+        
+        bot.send_message(message.chat.id, f"✅ Продолжительность урока установлена: {duration} мин")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+    finally:
+        settings_menu(message)
+
+@bot.message_handler(func=lambda message: message.text == '2. Приостановить звонки')
+def pause_cron(message):
+    try:
+        # Резервное копирование и очистка cron
+        with open(CRON_BACKUP_FILE, 'w') as f:
+            f.write(os.popen("crontab -l").read())
+        os.system("crontab -r")
+        
+        settings = load_settings()
+        settings["cron_paused"] = True
+        save_settings(settings)
+        
+        bot.send_message(message.chat.id, "✅ Звонки приостановлены. Cron очищен.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+    finally:
+        settings_menu(message)
+
+@bot.message_handler(func=lambda message: message.text == '3. Запустить звонки')
+def resume_cron(message):
+    try:
+        if os.path.exists(CRON_BACKUP_FILE):
+            os.system(f"crontab {CRON_BACKUP_FILE}")
+            status = "восстановлены"
+        else:
+            install_cron_jobs()
+            status = "запущены (новые)"
+            
+        settings = load_settings()
+        settings["cron_paused"] = False
+        save_settings(settings)
+        
+        bot.send_message(message.chat.id, f"✅ Звонки {status}. Cron активирован.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+    finally:
+        settings_menu(message)
+#________________________________________________
 
 if __name__ == "__main__":
     print("Бот запущен...")
