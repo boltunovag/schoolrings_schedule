@@ -3,38 +3,40 @@ import telebot
 from telebot import types
 import time
 from dotenv import load_dotenv
+import json
+import logging
+import re
 
 # --- Настройки ---
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
+# Константы
 AUDIO_DIR = "audio_files"
 SCHEDULE_FILE = "schedule.txt"
 CRON_FILE = "audio_schedule.cron"
-SETTINGS_FILE = "settings.json"          # Новый файл для настроек
-CRON_BACKUP_FILE = "cron_backup.txt"     # Резервная копия cron
+SETTINGS_FILE = "settings.json"
+CRON_BACKUP_FILE = "cron_backup.txt"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # --- Класс для событий ---
 class LessonEvent:
     def __init__(self, lesson_num, event_type, time, audio_file):
         self.lesson_num = lesson_num
-        self.event_type = event_type  # 'start' или 'end'
-        self.time = time  # 'hh:mm'
-        self.audio_file = audio_file  # имя файла
+        self.event_type = event_type
+        self.time = time
+        self.audio_file = audio_file
 
-import logging
-
+# --- Логирование ---
 logging.basicConfig(
     filename='bot_errors.log',
-    level=logging.INFO,  # Изменил на INFO чтобы видеть больше событий
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filemode='a'  # Добавляем в конец файла, а не перезаписываем
+    filemode='a'
 )
 
 # --- Работа с расписанием ---
-
 def load_events():
     """Загружает события из файла"""
     events = []
@@ -49,47 +51,39 @@ def load_events():
                     event_type, lesson_num, time, audio_file = parts
                     events.append(LessonEvent(lesson_num, event_type, time, audio_file))
     except Exception as e:
-        print(f"Ошибка загрузки: {str(e)}")
+        logging.error(f"Ошибка загрузки расписания: {str(e)}")
     return events
 
-
 def save_events(events):
-    """Сохраняет события в файл, обновляя существующие уроки"""
-    # Создаем словарь для хранения последних версий событий
+    """Сохраняет события в файл"""
     lesson_records = {}
     
-    # Группируем события по номеру урока и типу
     for event in events:
         key = (event.lesson_num, event.event_type)
         lesson_records[key] = event
     
-    # Записываем в файл, сохраняя порядок уроков
     with open(SCHEDULE_FILE, 'w') as f:
-        # Сначала записываем все начала уроков
         for key in sorted(lesson_records.keys()):
             if key[1] == 'start':
                 event = lesson_records[key]
                 line = f"{event.event_type} {event.lesson_num} {event.time} {event.audio_file}\n"
                 f.write(line)
         
-        # Затем записываем все окончания уроков
         for key in sorted(lesson_records.keys()):
             if key[1] == 'end':
                 event = lesson_records[key]
                 line = f"{event.event_type} {event.lesson_num} {event.time} {event.audio_file}\n"
                 f.write(line)
 
-
 # --- Работа с настройками ---
 def load_settings():
     """Загружает настройки из файла"""
     default_settings = {
-        "lesson_duration": 45,  # по умолчанию 45 минут
+        "lesson_duration": 45,
         "cron_paused": False
     }
     try:
         with open(SETTINGS_FILE, 'r') as f:
-            import json
             return {**default_settings, **json.load(f)}
     except:
         return default_settings
@@ -97,22 +91,7 @@ def load_settings():
 def save_settings(settings):
     """Сохраняет настройки в файл"""
     with open(SETTINGS_FILE, 'w') as f:
-        import json
         json.dump(settings, f)
-        
-# --- Ненужная функция. Будет удалена
-def clear_schedule():
-    """Полностью очищает расписание"""
-    try:
-        if os.path.exists(SCHEDULE_FILE):
-            os.remove(SCHEDULE_FILE)
-        if os.path.exists(CRON_FILE):
-            os.remove(CRON_FILE)
-        os.system("crontab -r 2>/dev/null")
-        return True
-    except Exception as e:
-        print(f"Ошибка очистки: {str(e)}")
-        return False
 
 # --- Работа с cron ---
 def generate_cron_jobs(events):
@@ -120,19 +99,14 @@ def generate_cron_jobs(events):
     if not os.path.exists(AUDIO_DIR):
         os.makedirs(AUDIO_DIR, exist_ok=True)
     
-    # Получаем абсолютный путь к папке с аудио
     abs_audio_dir = os.path.abspath(AUDIO_DIR)
     cron_log = os.path.join(abs_audio_dir, 'cron.log')
     
     cron_content = "# Аудио расписание\n\n"
-    cron_content += f"# Audio dir: {abs_audio_dir}\n\n"
     
     for event in sorted(events, key=lambda x: x.time):
         try:
-            # Используем абсолютный путь к файлу
             audio_path = os.path.join(abs_audio_dir, event.audio_file)
-            print(f"DEBUG: Audio path: {audio_path}")  # Для отладки
-            
             if not os.path.exists(audio_path):
                 raise FileNotFoundError(f"Audio file {audio_path} not found")
             
@@ -143,8 +117,7 @@ def generate_cron_jobs(events):
                 f">>{cron_log} 2>&1\n"
             )
         except Exception as e:
-            print(f"Error processing event {event.lesson_num}: {str(e)}")
-            continue
+            logging.error(f"Error processing event {event.lesson_num}: {str(e)}")
     
     return cron_content
 
@@ -162,19 +135,18 @@ def install_cron_jobs():
         exit_code = os.system(f"crontab {CRON_FILE}")
         return exit_code == 0, "Cron-задания успешно установлены!" if exit_code == 0 else "Ошибка установки crontab"
     except Exception as e:
+        logging.error(f"Ошибка установки cron: {str(e)}")
         return False, f"Ошибка: {str(e)}"
 
-# --- Команды бота ---
 
+# --- Команды бота ---
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
         types.KeyboardButton('/add_lesson'),
         types.KeyboardButton('/show_schedule'),
-        types.KeyboardButton('/install_cron'),
-        types.KeyboardButton('/clear'),
-        types.KeyboardButton('/settings')  # Новая кнопка
+        types.KeyboardButton('/settings')
     ]
     markup.add(*buttons)
     
@@ -184,202 +156,91 @@ def start(message):
         "Доступные команды:\n"
         "/add_lesson - добавить урок\n"
         "/show_schedule - показать расписание\n"
-        "/install_cron - установить cron\n"
-        "/clear - очистить расписание\n"
         "/settings - настройки",
         reply_markup=markup
     )
 
-@bot.message_handler(commands=['cancel'])
-def cancel(message):
-    start(message)
+
+################################Показ расписания##################################################
 
 @bot.message_handler(commands=['show_schedule'])
 def show_schedule(message):
-    events = load_events()
-    if not events:
-        bot.send_message(message.chat.id, "Расписание пусто.")
-        return
-    
-    response = "📅 Текущее расписание:\n\n"
-    for event in events:
-        response += f"Урок {event.lesson_num}: {'Начало' if event.event_type == 'start' else 'Конец'} в {event.time}\n"
-    bot.send_message(message.chat.id, response)
-
-_unused='''@bot.message_handler(commands=['clear'])
-    if clear_schedule():
-        bot.send_message(message.chat.id, "✅ Расписание и crontab очищены")
-    else:
-        bot.send_message(message.chat.id, "❌ Ошибка при очистке")'''
-
-@bot.message_handler(commands=['install_cron'])
-def handle_install_cron(message):
-    success, result = install_cron_jobs()
-    if success:
-        with open(CRON_FILE, 'rb') as f:
-            bot.send_document(
-                message.chat.id,
-                f,
-                caption=f"✅ {result}"
-            )
-    else:
-        bot.send_message(message.chat.id, f"❌ {result}")
-
-# --- Добавление урока ---
-@bot.message_handler(commands=['add_lesson'])
-def add_lesson(message):
-    msg = bot.send_message(message.chat.id, "Введите номер урока:")
-    bot.register_next_step_handler(msg, process_lesson_number)
-
-# В process_lesson_number:
-def process_lesson_number(message):
     try:
-        if not message.text:  # Добавляем проверку на наличие текста
-            raise ValueError("Пожалуйста, введите номер урока")
-            
-        lesson_num = message.text.strip()
-        if not lesson_num.isdigit():
-            raise ValueError("Номер урока должен быть числом")
-            
-        msg = bot.send_message(message.chat.id, f"Урок {lesson_num}. Введите время начала (hh:mm):")
-        bot.register_next_step_handler(msg, process_start_time, lesson_num)
-    except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
-        start(message)  # Возвращаем в начало
-
-# В process_start_time и process_end_time:
-
-def validate_time(time_str):
-    try:
-        hh, mm = map(int, time_str.split(':'))
-        return 0 <= hh < 24 and 0 <= mm < 60
-    except:
-        return False
-    
-
-
-def process_start_time(message, lesson_num):
-    try:
-        if not message.text:  # Проверка наличия текста
-            raise ValueError("Пожалуйста, введите время в формате hh:mm")
-            
-        start_time = message.text.strip()  # Получаем время из сообщения
-        if not validate_time(start_time):
-            raise ValueError("Некорректное время. Формат: HH:MM (00:00-23:59)")
-            
-        msg = bot.send_message(message.chat.id, "Отправьте аудиофайл для начала урока:")
-        bot.register_next_step_handler(msg, process_start_audio, lesson_num, start_time)
-    except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
-        add_lesson(message)  # Возврат к вводу номера урока
-
-
-# В process_start_audio и process_end_audio:
-
-def process_start_audio(message, lesson_num, start_time):
-    try:
-        os.makedirs(AUDIO_DIR, exist_ok=True)
-
-        if not (message.audio or message.voice or message.text):
-            raise ValueError("Пожалуйста, отправьте аудиофайл или введите /cancel для отмены")
-
-        if message.text and message.text.strip().lower() == '/cancel':
-            return start(message)
-
-        if not (message.audio or message.voice):
-            raise ValueError("Пожалуйста, отправьте именно аудиофайл")
-
-        file_id = message.voice.file_id if message.voice else message.audio.file_id
-        file_ext = "ogg" if message.voice else message.audio.file_name.split('.')[-1]
-        file_name = f"lesson_{lesson_num}_start_{int(time.time())}.{file_ext}"
-
-        bot.send_chat_action(message.chat.id, 'upload_audio')
-        file_info = bot.get_file(file_id)
-        downloaded_file = bot.download_file(file_info.file_path)        
-
-        if len(downloaded_file) > 10 * 1024 * 1024:
-            raise ValueError("Аудиофайл слишком большой (макс. 10MB)")
-
-        file_path = os.path.join(AUDIO_DIR, file_name)
-        with open(file_path, 'wb') as f:
-            f.write(downloaded_file)
-
-        if not os.path.exists(file_path):
-            raise IOError("Не удалось сохранить аудиофайл")
-
-        msg = bot.send_message(message.chat.id, 
-                               f"Аудио для начала урока сохранено.\n"
-            f"Введите время окончания урока {lesson_num} (hh:mm):")
-        bot.register_next_step_handler(msg, process_end_time, lesson_num, start_time, file_name)
-
-    except Exception as e:
-        error_msg = f"❌ Ошибка: {str(e)}\n\nПопробуй снова: /add_lesson"
-        bot.send_message(message.chat.id, error_msg)
-        logging.error(f"Error in process_start_audio: {str(e)}", exc_info=True)
-
-def process_end_time(message, lesson_num, start_time, start_audio_file):
-    try:
-        if not message.text:  # Добавлена проверка на наличие текста
-            raise ValueError("Пожалуйста, введите время окончания урока")
-            
-        end_time = message.text.strip()
-        if not validate_time(end_time):  # Используем функцию валидации
-            raise ValueError("Некорректное время. Формат: HH:MM (00:00-23:59)")
-            
-        # Загружаем текущие события и добавляем начало урока
+        # Получаем текущие события из нашего расписания
         events = load_events()
-        events.append(LessonEvent(lesson_num, "start", start_time, start_audio_file))
         
-        # Запрашиваем аудио для конца урока
-        msg = bot.send_message(message.chat.id, "Отправьте аудиофайл для окончания урока:")
-        bot.register_next_step_handler(msg, process_end_audio, lesson_num, end_time, events)
+        if not events:
+            bot.send_message(message.chat.id, "Расписание пусто.")
+            return
+        
+        # Группируем события по урокам для удобного отображения
+        lessons = {}
+        for event in events:
+            if event.lesson_num not in lessons:
+                lessons[event.lesson_num] = {'start': None, 'end': None}
+            
+            if event.event_type == 'start':
+                lessons[event.lesson_num]['start'] = {
+                    'time': event.time,
+                    'audio': event.audio_file
+                }
+            elif event.event_type == 'end':
+                lessons[event.lesson_num]['end'] = {
+                    'time': event.time,
+                    'audio': event.audio_file
+                }
+        
+        # Формируем сообщение с расписанием
+        schedule_text = "📅 Текущее расписание:\n\n"
+        for lesson_num in sorted(lessons.keys(), key=lambda x: int(x)):
+            lesson = lessons[lesson_num]
+            schedule_text += (
+                f"Урок {lesson_num}:\n"
+                f"  🔔 Начало: {lesson['start']['time']} (аудио: {lesson['start']['audio']})\n"
+                f"  🔕 Конец: {lesson['end']['time']} (аудио: {lesson['end']['audio']})\n\n"
+            )
+        
+        # Добавляем информацию о cron
+        cron_status = get_cron_status()
+        schedule_text += f"\nСтатус cron: {cron_status}"
+        
+        bot.send_message(message.chat.id, schedule_text)
         
     except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
-        start(message)
+        logging.error(f"Ошибка при показе расписания: {str(e)}")
+        bot.send_message(message.chat.id, f"Произошла ошибка: {str(e)}")
 
-def process_end_audio(message, lesson_num, end_time, events):
+def get_cron_status():
+    """Проверяет статус cron и возвращает текстовое описание"""
     try:
-        if not (message.audio or message.voice or message.text):
-            raise ValueError("Пожалуйста, отправьте аудиофайл или введите /cancel для отмены")
-            
-        if message.text and message.text.strip().lower() == '/cancel':
-            return start(message)
-            
-        if not (message.audio or message.voice):
-            raise ValueError("Пожалуйста, отправьте именно аудиофайл")
-
-        # Вставляем здесь - перед началом загрузки аудио
-        bot.send_chat_action(message.chat.id, 'upload_audio')  # <-- ВОТ ТУТ
-            
-        file_id = message.voice.file_id if message.voice else message.audio.file_id
-        file_ext = "ogg" if message.voice else message.audio.file_name.split('.')[-1]
-        file_name = f"lesson_{lesson_num}_end_{int(time.time())}.{file_ext}"
+        # Получаем содержимое crontab
+        cron_output = os.popen("crontab -l 2>&1").read()
         
-        file_info = bot.get_file(file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
+        if "no crontab" in cron_output.lower():
+            return "Не установлен"
         
-        audio_path = os.path.join(AUDIO_DIR, file_name)
-        with open(audio_path, 'wb') as f:
-            bot.send_chat_action(message.chat.id, 'upload_document')  # Для записи на диск
-            f.write(downloaded_file)        
-            
-        events.append(LessonEvent(lesson_num, "end", end_time, file_name))
-        save_events(events)
+        # Проверяем наличие наших записей
+        events = load_events()
+        if not events:
+            return "Установлен (нет наших записей)"
         
-        bot.send_message(
-            message.chat.id,
-            f"✅ Урок {lesson_num} успешно добавлен!\n"
-            f"Начало: {events[-2].time}\n"
-            f"Окончание: {end_time}\n\n"
-            f"Не забудьте установить расписание командой /install_cron"
-        )
+        # Подсчитываем наши записи в crontab
+        our_entries = 0
+        for event in events:
+            if f"mpg123 '{os.path.join(os.path.abspath(AUDIO_DIR), event.audio_file)}'" in cron_output:
+                our_entries += 1
+        
+        settings = load_settings()
+        if settings.get("cron_paused", False):
+            return f"Приостановлен (наших записей: {our_entries}/{len(events)*2})"
+        
+        return f"Активен (наших записей: {our_entries}/{len(events)*2})"
+    
     except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
-        start(message)
-        
-"""Новый код"""
-# --- Меню настроек ---
+        logging.error(f"Ошибка проверки статуса cron: {str(e)}")
+        return "Неизвестен"
+################################Конец показа расписания##################################################
+
 @bot.message_handler(commands=['settings'])
 def settings_menu(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
@@ -403,7 +264,7 @@ def settings_menu(message):
         reply_markup=markup
     )
 
-# Обработчики пунктов меню настроек
+# Обработчики для меню настроек
 @bot.message_handler(func=lambda message: message.text == '1. Продолжительность урока')
 def set_lesson_duration(message):
     msg = bot.send_message(message.chat.id, "Сколько минут длится урок? (Введите число от 1 до 120):")
@@ -428,7 +289,6 @@ def process_lesson_duration(message):
 @bot.message_handler(func=lambda message: message.text == '2. Приостановить звонки')
 def pause_cron(message):
     try:
-        # Резервное копирование и очистка cron
         with open(CRON_BACKUP_FILE, 'w') as f:
             f.write(os.popen("crontab -l").read())
         os.system("crontab -r")
@@ -462,8 +322,159 @@ def resume_cron(message):
         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
     finally:
         settings_menu(message)
-#________________________________________________
 
+# ... (остальные существующие функции process_lesson_number, 
+# process_start_time, process_start_audio, process_end_time, 
+# process_end_audio остаются без изменений)
+current_lessons = {}  # Временное хранилище для уроков в процессе добавления
+
+@bot.message_handler(commands=['add_lesson'])
+def add_lesson(message):
+    msg = bot.send_message(message.chat.id, "Введите номер урока (например, 1):")
+    bot.register_next_step_handler(msg, process_lesson_number)
+
+def process_lesson_number(message):
+    try:
+        lesson_num = message.text.strip()
+        if not lesson_num.isdigit():
+            raise ValueError("Номер урока должен быть числом")
+            
+        # Создаем запись для урока
+        current_lessons[message.chat.id] = {
+            'lesson_num': lesson_num,
+            'start': None,
+            'end': None
+        }
+        
+        msg = bot.send_message(message.chat.id, f"Урок {lesson_num}. Введите время начала (формат ЧЧ:ММ):")
+        bot.register_next_step_handler(msg, process_start_time)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
+        start(message)
+
+def process_start_time(message):
+    try:
+        time_str = message.text.strip()
+        # Проверка формата времени
+        if not re.match(r'^\d{1,2}:\d{2}$', time_str):
+            raise ValueError("Неверный формат времени. Используйте ЧЧ:ММ")
+            
+        hour, minute = map(int, time_str.split(':'))
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ValueError("Некорректное время")
+            
+        current_lessons[message.chat.id]['start_time'] = time_str
+        
+        msg = bot.send_message(message.chat.id, "Отправьте аудиофайл для звонка на начало урока:")
+        bot.register_next_step_handler(msg, process_start_audio)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
+        start(message)
+
+def process_start_audio(message):
+    try:
+        if not message.audio and not message.document:
+            raise ValueError("Пожалуйста, отправьте аудиофайл")
+            
+        file_info = None
+        if message.audio:
+            file_info = bot.get_file(message.audio.file_id)
+        elif message.document:
+            file_info = bot.get_file(message.document.file_id)
+            
+        if not file_info:
+            raise ValueError("Не удалось получить файл")
+            
+        downloaded_file = bot.download_file(file_info.file_path)
+        file_ext = os.path.splitext(file_info.file_path)[1]
+        filename = f"start_{current_lessons[message.chat.id]['lesson_num']}{file_ext}"
+        filepath = os.path.join(AUDIO_DIR, filename)
+        
+        with open(filepath, 'wb') as f:
+            f.write(downloaded_file)
+            
+        current_lessons[message.chat.id]['start_audio'] = filename
+        
+        settings = load_settings()
+        duration = settings['lesson_duration']
+        
+        # Вычисляем время окончания урока
+        start_time = current_lessons[message.chat.id]['start_time']
+        h, m = map(int, start_time.split(':'))
+        end_h = h + (m + duration) // 60
+        end_m = (m + duration) % 60
+        end_time = f"{end_h:02d}:{end_m:02d}"
+        
+        current_lessons[message.chat.id]['end_time'] = end_time
+        
+        msg = bot.send_message(
+            message.chat.id,
+            f"Время окончания урока автоматически установлено: {end_time}\n"
+            "Отправьте аудиофайл для звонка на конец урока:"
+        )
+        bot.register_next_step_handler(msg, process_end_audio)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
+        start(message)
+
+def process_end_audio(message):
+    try:
+        if not message.audio and not message.document:
+            raise ValueError("Пожалуйста, отправьте аудиофайл")
+            
+        file_info = None
+        if message.audio:
+            file_info = bot.get_file(message.audio.file_id)
+        elif message.document:
+            file_info = bot.get_file(message.document.file_id)
+            
+        if not file_info:
+            raise ValueError("Не удалось получить файл")
+            
+        downloaded_file = bot.download_file(file_info.file_path)
+        file_ext = os.path.splitext(file_info.file_path)[1]
+        filename = f"end_{current_lessons[message.chat.id]['lesson_num']}{file_ext}"
+        filepath = os.path.join(AUDIO_DIR, filename)
+        
+        with open(filepath, 'wb') as f:
+            f.write(downloaded_file)
+            
+        current_lessons[message.chat.id]['end_audio'] = filename
+        
+        # Сохраняем урок в расписание
+        lesson_data = current_lessons[message.chat.id]
+        events = load_events()
+        
+        events.append(LessonEvent(
+            lesson_num=lesson_data['lesson_num'],
+            event_type='start',
+            time=lesson_data['start_time'],
+            audio_file=lesson_data['start_audio']
+        ))
+        
+        events.append(LessonEvent(
+            lesson_num=lesson_data['lesson_num'],
+            event_type='end',
+            time=lesson_data['end_time'],
+            audio_file=lesson_data['end_audio']
+        ))
+        
+        save_events(events)
+        
+        bot.send_message(
+            message.chat.id,
+            f"✅ Урок {lesson_data['lesson_num']} добавлен в расписание!\n"
+            f"Начало: {lesson_data['start_time']}\n"
+            f"Окончание: {lesson_data['end_time']}"
+        )
+        
+        # Удаляем временные данные
+        del current_lessons[message.chat.id]
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
+    finally:
+        start(message)
+        
 if __name__ == "__main__":
     print("Бот запущен...")
     bot.infinity_polling()
