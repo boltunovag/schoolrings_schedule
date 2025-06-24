@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import json
 import logging
 import re
+from datetime import datetime 
 
 # --- Настройки ---
 load_dotenv()
@@ -19,6 +20,8 @@ CRON_FILE = "audio_schedule.cron"
 SETTINGS_FILE = "settings.json"
 CRON_BACKUP_FILE = "cron_backup.txt"
 os.makedirs(AUDIO_DIR, exist_ok=True)
+
+
 
 # --- Класс для событий ---
 class LessonEvent:
@@ -35,6 +38,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     filemode='a'
 )
+
 def get_cron_path():
     """Определяет путь к crontab пользователя"""
     # Варианты расположения crontab для разных систем
@@ -58,6 +62,70 @@ def check_file_permissions():
     except:
         return False
 # --- Работа с расписанием ---
+
+# В функции calculate_end_time можно добавить проверку:
+def calculate_end_time(start_time, duration):
+    h, m = map(int, start_time.split(':'))
+    total_minutes = h * 60 + m + duration
+    
+    if total_minutes >= 24*60:
+        raise ValueError("Урок не может заканчиваться после полуночи")
+    
+    end_h = total_minutes // 60
+    end_m = total_minutes % 60
+    return f"{end_h:02d}:{end_m:02d}"
+#---------------------------------------------------->
+
+def validate_lesson_times(new_lesson_num, new_start, new_end, existing_events):
+    """Проверяет:
+    1. Начало раньше конца
+    2. Для новых уроков - начало после последнего урока
+    3. Нет пересечений с другими уроками
+    """
+    # 1. Базовая проверка
+    if new_start >= new_end:
+        return False, "⛔ Начало должно быть раньше конца"
+
+    existing_nums = {int(e.lesson_num) for e in existing_events}
+    current_num = int(new_lesson_num)
+    
+    # 2. Если это новый урок (не существующий номер)
+    if current_num not in existing_nums:
+        if existing_events:
+            # Находим время конца последнего урока
+            last_lesson_end = max(
+                [e.time for e in existing_events if e.event_type == 'end'],
+                key=lambda x: datetime.strptime(x, "%H:%M")
+            )
+            
+            if new_start < last_lesson_end:
+                return False, (
+                    f"⛔ Урок {new_lesson_num} должен начинаться ПОСЛЕ "
+                    f"конца последнего урока ({last_lesson_end})"
+                )
+    
+    # 3. Проверка пересечений со всеми уроками (кроме текущего)
+    for event in existing_events:
+        if event.lesson_num == new_lesson_num:
+            continue
+            
+        if event.event_type == 'start':
+            other_end = next(
+                (e.time for e in existing_events 
+                 if e.lesson_num == event.lesson_num and e.event_type == 'end'),
+                None
+            )
+            if not other_end:
+                continue
+                
+            if (new_start < other_end) and (new_end > event.time):
+                return False, (
+                    f"⛔ Пересечение с уроком {event.lesson_num} "
+                    f"({event.time}-{other_end})"
+                )
+    
+    return True, "✅ Время урока корректно"
+#---------------------------------------------------->
 def load_events():
     """Загружает события из файла"""
     events = []
@@ -75,7 +143,6 @@ def load_events():
         logging.error(f"Ошибка загрузки расписания: {str(e)}")
     return events
 
-def save_events(events):
     """Сохраняет события в файл и автоматически устанавливает cron"""
 def save_events(events):
     try:
@@ -453,37 +520,42 @@ def process_lesson_number(message):
         if not lesson_num.isdigit():
             raise ValueError("Номер урока должен быть числом")
             
-        # Создаем запись для урока
+        existing_events = load_events()
+        existing_nums = {int(e.lesson_num) for e in existing_events}
+        current_num = int(lesson_num)
+        
+        # Если есть существующие уроки
+        if existing_nums:
+            max_num = max(existing_nums)
+            
+            # Проверяем можно ли добавить/изменить урок
+            if current_num not in existing_nums:  # Новый номер
+                if current_num != max_num + 1:
+                    raise ValueError(
+                        f"Нельзя добавить урок №{current_num}. "
+                        f"Следующий доступный номер: {max_num + 1}"
+                    )
+            # else: номер существует - разрешаем редактирование
+            
+        # Сохраняем данные урока
         current_lessons[message.chat.id] = {
             'lesson_num': lesson_num,
-            'start': None,
-            'end': None
+            'start_time': None,
+            'end_time': None,
+            'start_audio': None,
+            'end_audio': None
         }
         
-        msg = bot.send_message(message.chat.id, f"Урок {lesson_num}. Введите время начала (формат ЧЧ:ММ):")
-        bot.register_next_step_handler(msg, process_start_time)
+        bot.send_message(
+            message.chat.id,
+            f"Урок {lesson_num}. Введите время начала (ЧЧ:ММ):"
+        )
+        bot.register_next_step_handler(message, process_start_time)
+        
     except Exception as e:
         bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
         start(message)
 
-def process_start_time(message):
-    try:
-        time_str = message.text.strip()
-        # Проверка формата времени
-        if not re.match(r'^\d{1,2}:\d{2}$', time_str):
-            raise ValueError("Неверный формат времени. Используйте ЧЧ:ММ")
-            
-        hour, minute = map(int, time_str.split(':'))
-        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-            raise ValueError("Некорректное время")
-            
-        current_lessons[message.chat.id]['start_time'] = time_str
-        
-        msg = bot.send_message(message.chat.id, "Отправьте аудиофайл для звонка на начало урока:")
-        bot.register_next_step_handler(msg, process_start_audio)
-    except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
-        start(message)
 
 def is_valid_audio_file(file_info):
     """Проверяет, что файл является аудио"""
@@ -499,79 +571,116 @@ def calculate_end_time(start_time, duration):
     end_m = total_minutes % 60
     return f"{end_h:02d}:{end_m:02d}"
 
-def process_start_audio(message):
+def normalize_time(time_str):
+    """Нормализует время в формат HH:MM"""
+    parts = time_str.split(':')
+    if len(parts) != 2:
+        raise ValueError("Неверный формат времени")
+    
+    h, m = parts
     try:
-        # Проверяем, что прислан аудиофайл или документ
-        if not message.audio and not message.document:
-            raise ValueError("Пожалуйста, отправьте аудиофайл (MP3, WAV и т.д.)")
-            
-        # Получаем информацию о файле
-        file_info = None
-        if message.audio:
-            file_info = bot.get_file(message.audio.file_id)
-        elif message.document:
-            file_info = bot.get_file(message.document.file_id)
-            
-        if not file_info:
-            raise ValueError("Не удалось получить информацию о файле")
-            
-        # Проверяем тип файла
-        if not is_valid_audio_file(file_info):
-            raise ValueError("Файл должен быть аудио (MP3, WAV, OGG и т.д.)")
-            
-        # Скачиваем файл
-        downloaded_file = bot.download_file(file_info.file_path)
-        if not downloaded_file:
-            raise ValueError("Не удалось скачать файл")
-            
-        # Создаем имя файла
-        file_ext = os.path.splitext(file_info.file_path)[1]
-        if not file_ext:  # Если нет расширения
-            file_ext = '.mp3'  # Устанавливаем по умолчанию
-            
-        filename = f"start_{current_lessons[message.chat.id]['lesson_num']}{file_ext}"
-        filepath = os.path.join(AUDIO_DIR, filename)
+        hour = int(h)
+        minute = int(m)
+    except ValueError:
+        raise ValueError("Часы и минуты должны быть числами")
+    
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("Некорректное время (должно быть 00:00-23:59)")
+    
+    return f"{hour:02d}:{minute:02d}"
+
+def process_start_time(message):
+    try:
+        lesson_num = current_lessons[message.chat.id]['lesson_num']
+        time_str = message.text.strip()
         
-        # Сохраняем файл
-        with open(filepath, 'wb') as f:
-            f.write(downloaded_file)
-            
-        # Обновляем данные урока
-        current_lessons[message.chat.id]['start_audio'] = filename
+        # Нормализуем время
+        start_time = normalize_time(time_str)
         
         # Вычисляем время окончания
         settings = load_settings()
         duration = settings['lesson_duration']
-        start_time = current_lessons[message.chat.id]['start_time']
         end_time = calculate_end_time(start_time, duration)
         
+        # Проверяем пересечение с другими уроками
+        existing_events = load_events()
+        is_valid, error_msg = validate_lesson_times(lesson_num, start_time, end_time, existing_events)
+        if not is_valid:
+            raise ValueError(error_msg)
+            
+        # Сохраняем время
+        current_lessons[message.chat.id]['start_time'] = start_time
         current_lessons[message.chat.id]['end_time'] = end_time
         
-        # Запрашиваем аудио для конца урока
-        msg = bot.send_message(
-            message.chat.id,
-            f"Время окончания урока автоматически установлено: {end_time}\n"
-            "Отправьте аудиофайл для звонка на конец урока:"
-        )
-        bot.register_next_step_handler(msg, process_end_audio)
+        msg = bot.send_message(message.chat.id, "Отправьте аудиофайл для начала урока:")
+        bot.register_next_step_handler(msg, process_start_audio)
         
     except Exception as e:
-        # Очищаем временные данные при ошибке
         if message.chat.id in current_lessons:
-            if 'start_audio' in current_lessons[message.chat.id]:
-                audio_file = os.path.join(AUDIO_DIR, current_lessons[message.chat.id]['start_audio'])
-                if os.path.exists(audio_file):
-                    try:
-                        os.remove(audio_file)
-                    except:
-                        pass
             del current_lessons[message.chat.id]
-            
         bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
         start(message)
 
+
+#--------------------AUDIO------------------------------------>
+def process_start_audio(message):
+    try:
+        # Проверяем, что отправили аудиофайл
+        if not message.audio and not message.document:
+            raise ValueError("Отправьте аудиофайл в формате MP3, WAV или OGG")
+        
+        # Получаем файл
+        file_info = bot.get_file(message.audio.file_id if message.audio else message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        
+        # Сохраняем файл
+        file_ext = os.path.splitext(file_info.file_path)[1].lower() or '.mp3'
+        filename = f"start_{current_lessons[message.chat.id]['lesson_num']}{file_ext}"
+        with open(os.path.join(AUDIO_DIR, filename), 'wb') as f:
+            f.write(downloaded_file)
+        
+        # Сохраняем информацию о файле
+        current_lessons[message.chat.id]['start_audio'] = filename
+        
+        # Запрашиваем аудио для конца урока
+        bot.send_message(
+            message.chat.id, 
+            "Аудио для начала урока сохранено. Отправьте аудио для конца урока:"
+        )
+        bot.register_next_step_handler(message, process_end_audio)
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
+        if message.chat.id in current_lessons:
+            del current_lessons[message.chat.id]
+        start(message)
 def process_end_audio(message):
     try:
+        # [существующий код загрузки файла...]
+        
+        lesson_data = current_lessons[message.chat.id]
+        existing_events = load_events()
+        
+        # Удаляем события с тем же номером урока (мы их заменяем)
+        filtered_events = [e for e in existing_events if e.lesson_num != lesson_data['lesson_num']]
+        
+        # Финальная проверка перед сохранением
+        is_valid, error_msg = validate_lesson_times(
+            lesson_data['lesson_num'],
+            lesson_data['start_time'],
+            lesson_data['end_time'],
+            filtered_events
+        )
+        
+        if not is_valid:
+            # Удаляем сохраненные файлы при ошибке
+            for file_type in ['start_audio', 'end_audio']:
+                if file_type in lesson_data:
+                    filepath = os.path.join(AUDIO_DIR, lesson_data[file_type])
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+            raise ValueError(error_msg)
+
         # Проверяем, что пользователь действительно отправил аудиофайл
         if not message.audio and not message.document:
             raise ValueError("Пожалуйста, отправьте аудиофайл для звонка на конец урока")
