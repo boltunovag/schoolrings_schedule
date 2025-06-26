@@ -1,1 +1,5 @@
 .env
+bot_errors.log
+audio_schedule.cron
+audio_files
+schedule.txt

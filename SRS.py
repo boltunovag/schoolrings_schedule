@@ -13,14 +13,27 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
+
 # Константы
 AUDIO_DIR = "audio_files"
 SCHEDULE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schedule.txt")
 CRON_FILE = "audio_schedule.cron"
 SETTINGS_FILE = "settings.json"
 CRON_BACKUP_FILE = "cron_backup.txt"
-os.makedirs(AUDIO_DIR, exist_ok=True)
+CRON_BACKUPS_DIR = "cron_backups"  # Добавьте эту строку
+AUDIO_BACKUPS_DIR = "audio_backups"  # И эту строку
 
+os.makedirs(AUDIO_DIR, exist_ok=True)
+os.makedirs(CRON_BACKUPS_DIR, exist_ok=True)
+os.makedirs(AUDIO_BACKUPS_DIR, exist_ok=True)
+
+# Добавляем в начало файла (после других констант)
+PASSWORD_FILE = "password.txt"
+MAX_ATTEMPTS = 3
+SESSION_TIMEOUT = 30 * 60  # 30 минут в секундах
+
+# Глобальные переменные для хранения состояния аутентификации
+authenticated_users = {}  # {chat_id: (timestamp, level)}
 
 
 # --- Класс для событий ---
@@ -38,7 +51,57 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     filemode='a'
 )
+#--------------------Аутентификация----------------------------------->
+# Добавляем новые функции для работы с паролем
+def init_password():
+    """Инициализирует файл с паролем, если его нет"""
+    if not os.path.exists(PASSWORD_FILE):
+        with open(PASSWORD_FILE, 'w') as f:
+            f.write("admin123")  # Пароль по умолчанию
+        os.chmod(PASSWORD_FILE, 0o600)  # Доступ только владельцу
 
+def check_password(input_password):
+    """Проверяет введённый пароль"""
+    try:
+        with open(PASSWORD_FILE, 'r') as f:
+            correct_password = f.read().strip()
+        return input_password == correct_password
+    except Exception as e:
+        logging.error(f"Ошибка проверки пароля: {str(e)}")
+        return False
+
+def change_password(new_password):
+    """Изменяет пароль"""
+    try:
+        with open(PASSWORD_FILE, 'w') as f:
+            f.write(new_password.strip())
+        os.chmod(PASSWORD_FILE, 0o600)
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка изменения пароля: {str(e)}")
+        return False
+
+def is_authenticated(chat_id):
+    """Проверяет, аутентифицирован ли пользователь"""
+    if chat_id not in authenticated_users:
+        return False
+    
+    login_time, _ = authenticated_users[chat_id]
+    if time.time() - login_time > SESSION_TIMEOUT:
+        del authenticated_users[chat_id]
+        return False
+    
+    return True
+def auth_required(func):
+    """Декоратор для проверки аутентификации"""
+    def wrapper(message):
+        if not is_authenticated(message.chat.id):
+            request_password(message)
+            return
+        return func(message)
+    return wrapper
+
+#--------------------Работа с cron------------------------------------>
 def get_cron_path():
     """Определяет путь к crontab пользователя"""
     # Варианты расположения crontab для разных систем
@@ -77,54 +140,77 @@ def calculate_end_time(start_time, duration):
 #---------------------------------------------------->
 
 def validate_lesson_times(new_lesson_num, new_start, new_end, existing_events):
-    """Проверяет:
-    1. Начало раньше конца
-    2. Для новых уроков - начало после последнего урока
-    3. Нет пересечений с другими уроками
-    """
-    # 1. Базовая проверка
-    if new_start >= new_end:
-        return False, "⛔ Начало должно быть раньше конца"
+    """Проверяет корректность времени урока с учетом последовательности"""
+    try:
+        # Преобразуем время в минуты для удобства сравнения
+        def time_to_minutes(time_str):
+            h, m = map(int, time_str.split(':'))
+            return h * 60 + m
 
-    existing_nums = {int(e.lesson_num) for e in existing_events}
-    current_num = int(new_lesson_num)
-    
-    # 2. Если это новый урок (не существующий номер)
-    if current_num not in existing_nums:
-        if existing_events:
-            # Находим время конца последнего урока
-            last_lesson_end = max(
-                [e.time for e in existing_events if e.event_type == 'end'],
-                key=lambda x: datetime.strptime(x, "%H:%M")
-            )
-            
-            if new_start < last_lesson_end:
-                return False, (
-                    f"⛔ Урок {new_lesson_num} должен начинаться ПОСЛЕ "
-                    f"конца последнего урока ({last_lesson_end})"
-                )
-    
-    # 3. Проверка пересечений со всеми уроками (кроме текущего)
-    for event in existing_events:
-        if event.lesson_num == new_lesson_num:
-            continue
-            
-        if event.event_type == 'start':
-            other_end = next(
-                (e.time for e in existing_events 
-                 if e.lesson_num == event.lesson_num and e.event_type == 'end'),
-                None
-            )
-            if not other_end:
-                continue
+        new_start_min = time_to_minutes(new_start)
+        new_end_min = time_to_minutes(new_end)
+
+        # 1. Проверка что начало раньше конца
+        if new_start_min >= new_end_min:
+            return False, "⛔ Начало урока должно быть раньше конца"
+
+        # 2. Проверка последовательности уроков
+        existing_nums = {int(e.lesson_num) for e in existing_events}
+        current_num = int(new_lesson_num)
+
+        # Если это новый урок (не существующий номер)
+        if current_num not in existing_nums:
+            if existing_events:
+                # Находим максимальный номер урока
+                max_lesson_num = max(existing_nums)
                 
-            if (new_start < other_end) and (new_end > event.time):
-                return False, (
-                    f"⛔ Пересечение с уроком {event.lesson_num} "
-                    f"({event.time}-{other_end})"
+                # Если номер нового урока не следующий по порядку
+                if current_num != max_lesson_num + 1:
+                    return False, f"⛔ Следующий урок должен иметь номер {max_lesson_num + 1}"
+
+                # Находим время конца последнего урока
+                last_lesson_ends = [
+                    time_to_minutes(e.time) 
+                    for e in existing_events 
+                    if e.event_type == 'end'
+                ]
+                if last_lesson_ends:
+                    last_lesson_end = max(last_lesson_ends)
+                    if new_start_min < last_lesson_end:
+                        last_end_str = f"{last_lesson_end//60:02d}:{last_lesson_end%60:02d}"
+                        return False, (
+                            f"⛔ Урок {new_lesson_num} должен начинаться ПОСЛЕ "
+                            f"конца предыдущего урока ({last_end_str})"
+                        )
+
+        # 3. Проверка пересечений с другими уроками
+        for event in existing_events:
+            if event.lesson_num == new_lesson_num:
+                continue
+
+            if event.event_type == 'start':
+                other_start = time_to_minutes(event.time)
+                other_end = next(
+                    (time_to_minutes(e.time) 
+                     for e in existing_events 
+                     if e.lesson_num == event.lesson_num and e.event_type == 'end'),
+                    None
                 )
-    
-    return True, "✅ Время урока корректно"
+
+                if other_end:
+                    # Проверяем пересечение временных интервалов
+                    if (new_start_min < other_end) and (new_end_min > other_start):
+                        other_start_str = event.time
+                        other_end_str = f"{other_end//60:02d}:{other_end%60:02d}"
+                        return False, (
+                            f"⛔ Пересечение с уроком {event.lesson_num} "
+                            f"({other_start_str}-{other_end_str})"
+                        )
+
+        return True, "✅ Время урока корректно"
+
+    except ValueError as e:
+        return False, f"⛔ Ошибка формата времени: {str(e)}"
 #---------------------------------------------------->
 def load_events():
     """Загружает события из файла"""
@@ -282,13 +368,19 @@ def install_cron_jobs():
 
 #---------------------------------------------------------->
 # --- Команды бота ---
+# Модифицируем команду start
 @bot.message_handler(commands=['start'])
 def start(message):
+    if not is_authenticated(message.chat.id):
+        request_password(message)
+        return
+        
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
         types.KeyboardButton('/add_lesson'),
         types.KeyboardButton('/show_schedule'),
-        types.KeyboardButton('/settings')
+        types.KeyboardButton('/settings'),
+        types.KeyboardButton('/change_password')
     ]
     markup.add(*buttons)
     
@@ -298,9 +390,88 @@ def start(message):
         "Доступные команды:\n"
         "/add_lesson - добавить урок\n"
         "/show_schedule - показать расписание\n"
-        "/settings - настройки",
+        "/settings - настройки\n"
+        "/change_password - изменить пароль",
         reply_markup=markup
     )
+
+def request_password(message):
+    """Запрашивает пароль у пользователя"""
+    msg = bot.send_message(
+        message.chat.id,
+        "🔒 Для работы с ботом требуется аутентификация.\n"
+        "Введите пароль:"
+    )
+    bot.register_next_step_handler(msg, process_password)
+
+def process_password(message):
+    """Обрабатывает введённый пароль"""
+    try:
+        if check_password(message.text):
+            authenticated_users[message.chat.id] = (time.time(), "admin")
+            bot.send_message(message.chat.id, "✅ Успешная аутентификация!")
+            start(message)
+        else:
+            # Подсчёт попыток
+            if 'attempts' not in process_password.__dict__:
+                process_password.attempts = {}
+            
+            if message.chat.id not in process_password.attempts:
+                process_password.attempts[message.chat.id] = 1
+            else:
+                process_password.attempts[message.chat.id] += 1
+            
+            remaining = MAX_ATTEMPTS - process_password.attempts[message.chat.id]
+            
+            if remaining > 0:
+                msg = bot.send_message(
+                    message.chat.id,
+                    f"❌ Неверный пароль. Осталось попыток: {remaining}\n"
+                    "Попробуйте ещё раз:"
+                )
+                bot.register_next_step_handler(msg, process_password)
+            else:
+                del process_password.attempts[message.chat.id]
+                bot.send_message(
+                    message.chat.id,
+                    "🚫 Превышено максимальное количество попыток. "
+                    "Попробуйте позже."
+                )
+    except Exception as e:
+        logging.error(f"Ошибка в process_password: {str(e)}")
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Произошла ошибка при) проверке пароля. Попробуйте позже."
+        )
+
+# Добавляем команду для смены пароля
+@bot.message_handler(commands=['change_password'])
+@auth_required
+def change_password_command(message):
+    if not is_authenticated(message.chat.id):
+        request_password(message)
+        return
+        
+    msg = bot.send_message(
+        message.chat.id,
+        "Введите новый пароль (не менее 8 символов):"
+    )
+    bot.register_next_step_handler(msg, process_new_password)
+def process_new_password(message):
+    try:
+        new_password = message.text.strip()
+        if len(new_password) < 8:
+            raise ValueError("Пароль должен содержать не менее 8 символов")
+            
+        if change_password(new_password):
+            bot.send_message(message.chat.id, "✅ Пароль успешно изменён!")
+        else:
+            bot.send_message(message.chat.id, "❌ Не удалось изменить пароль!")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
+    finally:
+        start(message)       
+#-------------------Проверяем Cron------------------------->
 
 @bot.message_handler(commands=['debug_cron'])
 def debug_cron(message):
@@ -423,6 +594,7 @@ def get_cron_status():
 ################################Конец показа расписания##################################################
 
 @bot.message_handler(commands=['settings'])
+@auth_required
 def settings_menu(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     buttons = [
@@ -509,10 +681,19 @@ def resume_cron(message):
 # process_end_audio остаются без изменений)
 current_lessons = {}  # Временное хранилище для уроков в процессе добавления
 
+
 @bot.message_handler(commands=['add_lesson'])
+@auth_required
 def add_lesson(message):
-    msg = bot.send_message(message.chat.id, "Введите номер урока (например, 1):")
-    bot.register_next_step_handler(msg, process_lesson_number)
+    try:
+        msg = bot.send_message(message.chat.id, "Введите номер урока (например, 1):")
+        bot.register_next_step_handler(msg, process_lesson_number)
+    except Exception as e:
+        logging.error(f"Ошибка в /add_lesson: {str(e)}", exc_info=True)
+        bot.send_message(message.chat.id, f"❌ Ошибка при начале добавления урока: {str(e)}")
+        start(message)
+
+
 
 def process_lesson_number(message):
     try:
@@ -656,64 +837,77 @@ def process_start_audio(message):
         start(message)
 def process_end_audio(message):
     try:
-        # [существующий код загрузки файла...]
-        
+        # Проверка наличия данных урока
+        if message.chat.id not in current_lessons:
+            raise ValueError("Сессия добавления урока не найдена. Начните заново.")
+            
         lesson_data = current_lessons[message.chat.id]
+        
+        # Проверка обязательных полей
+        required_fields = {
+            'lesson_num': "Номер урока",
+            'start_time': "Время начала",
+            'end_time': "Время окончания",
+            'start_audio': "Аудио начала урока"
+        }
+        
+        for field, name in required_fields.items():
+            if field not in lesson_data or not lesson_data[field]:
+                raise ValueError(f"Отсутствует обязательное поле: {name}")
+
+        # Загрузка существующих событий
         existing_events = load_events()
         
-        # Удаляем события с тем же номером урока (мы их заменяем)
+        # Фильтрация событий
         filtered_events = [e for e in existing_events if e.lesson_num != lesson_data['lesson_num']]
         
-        # Финальная проверка перед сохранением
+        # Валидация времени урока
         is_valid, error_msg = validate_lesson_times(
             lesson_data['lesson_num'],
             lesson_data['start_time'],
             lesson_data['end_time'],
-            filtered_events
+            existing_events
+            #filtered_events
         )
         
         if not is_valid:
-            # Удаляем сохраненные файлы при ошибке
-            for file_type in ['start_audio', 'end_audio']:
-                if file_type in lesson_data:
-                    filepath = os.path.join(AUDIO_DIR, lesson_data[file_type])
-                    if os.path.exists(filepath):
-                        os.remove(filepath)
+            cleanup_lesson_files(lesson_data)
             raise ValueError(error_msg)
 
-        # Проверяем, что пользователь действительно отправил аудиофайл
+        # Проверка и загрузка аудиофайла
         if not message.audio and not message.document:
+            cleanup_lesson_files(lesson_data)
             raise ValueError("Пожалуйста, отправьте аудиофайл для звонка на конец урока")
 
-        # Получаем информацию о файле
         file_info = bot.get_file(message.audio.file_id if message.audio else message.document.file_id)
         if not file_info:
+            cleanup_lesson_files(lesson_data)
             raise ValueError("Не удалось получить информацию о файле")
 
-        # Проверяем расширение файла
-        file_ext = os.path.splitext(file_info.file_path)[1]
-        if not file_ext:  # Если нет расширения
-            file_ext = '.mp3'  # Устанавливаем по умолчанию
+        # Обработка расширения файла
+        file_ext = os.path.splitext(file_info.file_path)[1].lower()
+        if not file_ext or file_ext not in ['.mp3', '.wav', '.ogg', '.m4a']:
+            file_ext = '.mp3'
 
-        # Скачиваем и сохраняем файл
-        downloaded_file = bot.download_file(file_info.file_path)
-        filename = f"end_{current_lessons[message.chat.id]['lesson_num']}{file_ext}"
+        # Создание имени файла и пути
+        filename = f"end_{lesson_data['lesson_num']}{file_ext}"
         filepath = os.path.join(AUDIO_DIR, filename)
         
-        with open(filepath, 'wb') as f:
-            f.write(downloaded_file)
+        # Скачивание и сохранение файла
+        try:
+            downloaded_file = bot.download_file(file_info.file_path)
+            os.makedirs(AUDIO_DIR, exist_ok=True)
+            with open(filepath, 'wb') as f:
+                f.write(downloaded_file)
+        except Exception as e:
+            cleanup_lesson_files(lesson_data)
+            raise ValueError(f"Ошибка сохранения файла: {str(e)}")
 
-        # Обновляем данные урока
-        current_lessons[message.chat.id]['end_audio'] = filename
+        # Обновление данных урока
+        lesson_data['end_audio'] = filename
 
-        # Сохраняем урок в расписание
-        lesson_data = current_lessons[message.chat.id]
-        events = load_events()
-
-        # Удаляем старые записи для этого урока
-        events = [e for e in events if e.lesson_num != lesson_data['lesson_num']]
-
-        # Добавляем новые события
+        # Подготовка и сохранение расписания
+        events = [e for e in existing_events if e.lesson_num != lesson_data['lesson_num']]
         events.extend([
             LessonEvent(
                 lesson_num=lesson_data['lesson_num'],
@@ -725,53 +919,59 @@ def process_end_audio(message):
                 lesson_num=lesson_data['lesson_num'],
                 event_type='end',
                 time=lesson_data['end_time'],
-                audio_file=lesson_data['end_audio']
+                audio_file=filename
             )
         ])
 
-        # Проверка перед сохранением
+        # Проверка прав доступа
         schedule_dir = os.path.dirname(os.path.abspath(SCHEDULE_FILE))
-        if not os.path.exists(schedule_dir):
-            os.makedirs(schedule_dir, exist_ok=True)
+        os.makedirs(schedule_dir, exist_ok=True)
         
         if not os.access(schedule_dir, os.W_OK):
+            cleanup_lesson_files(lesson_data)
             raise Exception(f"Нет прав на запись в директорию {schedule_dir}")
 
         if not save_events(events):
+            cleanup_lesson_files(lesson_data)
             raise Exception("Не удалось сохранить файл расписания")
 
-        # Устанавливаем cron
+        # Обновление cron
         success, cron_msg = install_cron_jobs()
         if not success:
             raise Exception(f"Расписание сохранено, но не удалось обновить cron: {cron_msg}")
 
-        # Отправляем подтверждение
+        # Отправка подтверждения
         bot.send_message(
             message.chat.id,
             f"✅ Урок {lesson_data['lesson_num']} успешно добавлен!\n"
             f"⏰ Начало: {lesson_data['start_time']} ({lesson_data['start_audio']})\n"
-            f"⏰ Конец: {lesson_data['end_time']} ({lesson_data['end_audio']})"
+            f"⏰ Конец: {lesson_data['end_time']} ({filename})"
         )
 
     except Exception as e:
-        # В случае ошибки - удаляем сохраненные файлы
+        logging.error(f"Ошибка в process_end_audio: {str(e)}", exc_info=True)
         if message.chat.id in current_lessons:
-            lesson_data = current_lessons[message.chat.id]
-            for file_type in ['start_audio', 'end_audio']:
-                if file_type in lesson_data:
-                    filepath = os.path.join(AUDIO_DIR, lesson_data[file_type])
-                    if os.path.exists(filepath):
-                        try:
-                            os.remove(filepath)
-                        except:
-                            pass
+            cleanup_lesson_files(current_lessons[message.chat.id])
             del current_lessons[message.chat.id]
         
-        bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
-        logging.error(f"Ошибка в process_end_audio: {str(e)}", exc_info=True)
+        error_message = f"❌ Ошибка: {str(e)}"
+        if "Нет прав на запись" in str(e):
+            error_message += "\n\nПроверьте права доступа к файлам и директориям."
+        bot.send_message(message.chat.id, error_message)
     
     finally:
         start(message)
+
+def cleanup_lesson_files(lesson_data):
+    """Очистка файлов урока при ошибках"""
+    for file_type in ['start_audio', 'end_audio']:
+        if file_type in lesson_data and lesson_data[file_type]:
+            try:
+                filepath = os.path.join(AUDIO_DIR, lesson_data[file_type])
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except Exception as e:
+                logging.error(f"Ошибка удаления файла {filepath}: {str(e)}")
         
 #-----------------Ручная проверка------------------->
 @bot.message_handler(commands=['check_permissions'])
@@ -794,5 +994,11 @@ def check_permissions(message):
         bot.reply_to(message, f"Ошибка проверки: {str(e)}")        
         
 if __name__ == "__main__":
+    init_password()
+    # Проверка и создание необходимых директорий
+    os.makedirs(CRON_BACKUPS_DIR, exist_ok=True)
+    os.makedirs(AUDIO_BACKUPS_DIR, exist_ok=True)
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+    
     print("Бот запущен...")
     bot.infinity_polling()
