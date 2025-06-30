@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from datetime import datetime 
-
+import sys
 # --- Настройки ---
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -298,8 +298,9 @@ def generate_cron_jobs(events):
         try:
             audio_path = os.path.join(abs_audio_dir, event.audio_file)
             if not os.path.exists(audio_path):
-                raise FileNotFoundError(f"Audio file {audio_path} not found")
-            
+                logging.warning(f"Audio file {audio_path} not found, skipping")
+                continue
+                
             hour, minute = event.time.split(':')
             cron_content += (
                 f"{minute} {hour} * * 1-5 "
@@ -368,7 +369,7 @@ def install_cron_jobs():
 
 #---------------------------------------------------------->
 # --- Команды бота ---
-# Модифицируем команду start
+
 @bot.message_handler(commands=['start'])
 def start(message):
     if not is_authenticated(message.chat.id):
@@ -379,6 +380,7 @@ def start(message):
     buttons = [
         types.KeyboardButton('/add_lesson'),
         types.KeyboardButton('/show_schedule'),
+        types.KeyboardButton('/remove_lessons'),  # Новая кнопка
         types.KeyboardButton('/settings'),
         types.KeyboardButton('/change_password')
     ]
@@ -390,6 +392,7 @@ def start(message):
         "Доступные команды:\n"
         "/add_lesson - добавить урок\n"
         "/show_schedule - показать расписание\n"
+        "/remove_lessons - удалить последние уроки\n"  # Обновленная подпись
         "/settings - настройки\n"
         "/change_password - изменить пароль",
         reply_markup=markup
@@ -514,54 +517,68 @@ def debug_cron(message):
     except Exception as e:
         bot.reply_to(message, f"Ошибка диагностики: {str(e)}")
 ################################Показ расписания##################################################
-
 @bot.message_handler(commands=['show_schedule'])
 def show_schedule(message):
     try:
-        # Получаем текущие события из нашего расписания
         events = load_events()
-        
         if not events:
             bot.send_message(message.chat.id, "Расписание пусто.")
             return
         
-        # Группируем события по урокам для удобного отображения
+        # Группировка событий по урокам
         lessons = {}
         for event in events:
             if event.lesson_num not in lessons:
                 lessons[event.lesson_num] = {'start': None, 'end': None}
             
             if event.event_type == 'start':
-                lessons[event.lesson_num]['start'] = {
-                    'time': event.time,
-                    'audio': event.audio_file
-                }
+                lessons[event.lesson_num]['start'] = event
             elif event.event_type == 'end':
-                lessons[event.lesson_num]['end'] = {
-                    'time': event.time,
-                    'audio': event.audio_file
-                }
+                lessons[event.lesson_num]['end'] = event
         
-        # Формируем сообщение с расписанием
+        # Формируем сообщение и проверяем файлы
         schedule_text = "📅 Текущее расписание:\n\n"
+        missing_files = []
+        
         for lesson_num in sorted(lessons.keys(), key=lambda x: int(x)):
             lesson = lessons[lesson_num]
+            
+            # Проверяем файлы для начала урока
+            start_file_exists = os.path.exists(os.path.join(AUDIO_DIR, lesson['start'].audio_file))
+            start_status = "✅" if start_file_exists else "❌"
+            if not start_file_exists:
+                missing_files.append(f"start_{lesson_num}")
+            
+            # Проверяем файлы для конца урока
+            end_file_exists = os.path.exists(os.path.join(AUDIO_DIR, lesson['end'].audio_file))
+            end_status = "✅" if end_file_exists else "❌"
+            if not end_file_exists:
+                missing_files.append(f"end_{lesson_num}")
+            
             schedule_text += (
                 f"Урок {lesson_num}:\n"
-                f"  🔔 Начало: {lesson['start']['time']} (аудио: {lesson['start']['audio']})\n"
-                f"  🔕 Конец: {lesson['end']['time']} (аудио: {lesson['end']['audio']})\n\n"
+                f"  🔔 Начало: {lesson['start'].time} ({start_status} {lesson['start'].audio_file})\n"
+                f"  🔕 Конец: {lesson['end'].time} ({end_status} {lesson['end'].audio_file})\n\n"
             )
         
         # Добавляем информацию о cron
         cron_status = get_cron_status()
         schedule_text += f"\nСтатус cron: {cron_status}"
         
+        # Отправляем расписание
         bot.send_message(message.chat.id, schedule_text)
+        
+        # Отправляем отдельное сообщение о недостающих файлах
+        if missing_files:
+            bot.send_message(
+                message.chat.id,
+                "⚠️ Отсутствующие файлы:\n" + "\n".join(missing_files)
+            )
         
     except Exception as e:
         logging.error(f"Ошибка при показе расписания: {str(e)}")
         bot.send_message(message.chat.id, f"Произошла ошибка: {str(e)}")
-
+#№№№№№№№№№№№№№№№№№№№№№№№№№№№№№ КОНЕЦ ПОКАЗА РАСПИСАНИЯ №№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№
 def get_cron_status():
     """Проверяет статус cron и возвращает текстовое описание"""
     try:
@@ -591,8 +608,121 @@ def get_cron_status():
     except Exception as e:
         logging.error(f"Ошибка проверки статуса cron: {str(e)}")
         return "Неизвестен"
-################################Конец показа расписания##################################################
+################################Конец показа расписания###############################################
 
+# Глобальная переменная для хранения состояния удаления
+
+lesson_deletion_state = {}
+
+# Глобальный словарь для отслеживания состояния
+deletion_context = {}
+
+@bot.message_handler(commands=['remove_lessons'])
+@auth_required
+def handle_remove_lessons(message):
+    try:
+        events = load_events()
+        if not events:
+            bot.send_message(message.chat.id, "Нет уроков для удаления.")
+            return
+            
+        lesson_numbers = sorted({int(e.lesson_num) for e in events})
+        total = len(lesson_numbers)
+        
+        # Сохраняем контекст удаления
+        deletion_context[message.chat.id] = {
+            'lessons': lesson_numbers,
+            'waiting_for_input': True
+        }
+        
+        # Создаем клавиатуру
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
+        buttons = [types.KeyboardButton(f"Удалить {i}") for i in range(1, min(total, 5)+1)]
+        buttons.append(types.KeyboardButton("Отмена"))
+        markup.add(*buttons)
+        
+        bot.send_message(
+            message.chat.id,
+            f"Выберите количество уроков для удаления (1-{min(total,5)}):",
+            reply_markup=markup
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка в handle_remove_lessons: {str(e)}")
+        bot.send_message(message.chat.id, "Ошибка при подготовке удаления")
+
+# Главный обработчик ВСЕХ текстовых сообщений
+@bot.message_handler(func=lambda m: True, content_types=['text'])
+def handle_all_messages(message):
+    try:
+        chat_id = message.chat.id
+        
+        # Проверяем, ожидаем ли мы ввод количества для удаления
+        if chat_id in deletion_context and deletion_context[chat_id]['waiting_for_input']:
+            
+            if message.text == "Отмена":
+                del deletion_context[chat_id]
+                start(message)
+                return
+                
+            # Пытаемся извлечь число из сообщения
+            try:
+                count = int(message.text.split()[-1])  # "Удалить 1" -> 1
+            except:
+                bot.send_message(chat_id, "Пожалуйста, используйте кнопки")
+                return
+                
+            # Проверяем допустимость числа
+            max_lessons = len(deletion_context[chat_id]['lessons'])
+            if not 1 <= count <= min(max_lessons, 5):
+                bot.send_message(chat_id, f"Введите число от 1 до {min(max_lessons,5)}")
+                return
+                
+            # Вызываем функцию удаления
+            perform_lesson_deletion(chat_id, count)
+            del deletion_context[chat_id]  # Очищаем контекст
+            
+    except Exception as e:
+        logging.error(f"Ошибка в handle_all_messages: {str(e)}")
+
+def perform_lesson_deletion(chat_id, count):
+    try:
+        # Загружаем контекст
+        context = deletion_context.get(chat_id)
+        if not context:
+            bot.send_message(chat_id, "Сессия устарела, начните заново")
+            return
+            
+        lessons_to_delete = context['lessons'][-count:]
+        events = load_events()
+        
+        # Фильтруем события
+        remaining_events = [
+            e for e in events 
+            if int(e.lesson_num) not in lessons_to_delete
+        ]
+        
+        # Сохраняем изменения
+        if save_events(remaining_events):
+            # Удаляем файлы (добавьте свою логику удаления файлов)
+            bot.send_message(
+                chat_id,
+                f"Успешно удалено {count} уроков (номера: {lessons_to_delete})"
+            )
+            install_cron_jobs()  # Обновляем cron
+        else:
+            bot.send_message(chat_id, "Ошибка при сохранении изменений")
+            
+    except Exception as e:
+        logging.error(f"Ошибка удаления: {str(e)}")
+        bot.send_message(chat_id, f"Ошибка при удалении: {str(e)}")
+    finally:
+        # Гарантированная очистка клавиатуры
+        markup = types.ReplyKeyboardRemove()
+        bot.send_message(chat_id, "Готово!", reply_markup=markup)
+        if chat_id in deletion_context:
+            del deletion_context[chat_id]
+#-------------------------------Конец удаления уроков№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№
 @bot.message_handler(commands=['settings'])
 @auth_required
 def settings_menu(message):
@@ -991,14 +1121,82 @@ def check_permissions(message):
         bot.reply_to(message, f"Проверка прав:\n{report}")
         
     except Exception as e:
-        bot.reply_to(message, f"Ошибка проверки: {str(e)}")        
+        bot.reply_to(message, f"Ошибка проверки: {str(e)}")
         
+        
+@bot.message_handler(commands=['check_access'])
+def check_access(message):
+    dirs = [AUDIO_DIR, os.path.dirname(SCHEDULE_FILE), CRON_BACKUPS_DIR]
+    report = []
+    for d in dirs:
+        exists = os.path.exists(d)
+        writable = os.access(d, os.W_OK) if exists else False
+        report.append(f"{d}: exists={exists}, writable={writable}")
+    bot.send_message(message.chat.id, "\n".join(report))
+@bot.message_handler(commands=['debug_state'])
+def debug_state(message):
+    """Показывает текущее состояние удаления"""
+    if message.chat.id in lesson_deletion_state:
+        state = lesson_deletion_state[message.chat.id]
+        bot.send_message(message.chat.id, f"Состояние удаления:\n{json.dumps(state, indent=2)}")
+    else:
+        bot.send_message(message.chat.id, "Нет активного состояния удаления")
+
+@bot.message_handler(commands=['debug_events'])
+def debug_events(message):
+    """Показывает текущие события"""
+    events = load_events()
+    if not events:
+        bot.send_message(message.chat.id, "Нет событий в расписании")
+        return
+    
+    lesson_numbers = sorted({int(e.lesson_num) for e in events})
+    bot.send_message(message.chat.id, f"Текущие номера уроков: {lesson_numbers}")
+@bot.message_handler(commands=['check_files'])
+def check_files(message):
+    """Проверяет существование аудиофайлов"""
+    try:
+        events = load_events()
+        if not events:
+            bot.send_message(message.chat.id, "Нет уроков в расписании")
+            return
+        
+        missing_files = []
+        for event in events:
+            file_path = os.path.join(AUDIO_DIR, event.audio_file)
+            if not os.path.exists(file_path):
+                missing_files.append(
+                    f"{event.audio_file} (урок {event.lesson_num}, {'начало' if event.event_type == 'start' else 'конец'})"
+                )
+        
+        if missing_files:
+            bot.send_message(
+                message.chat.id,
+                "Отсутствующие файлы:\n" + "\n".join(missing_files)
+            )
+        else:
+            bot.send_message(message.chat.id, "✅ Все аудиофайлы на месте")
+            
+    except Exception as e:
+        logging.error(f"Ошибка в check_files: {str(e)}")
+        bot.send_message(message.chat.id, f"Ошибка проверки файлов: {str(e)}")
+#####################################ЗАПУСК№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№        
 if __name__ == "__main__":
     init_password()
-    # Проверка и создание необходимых директорий
     os.makedirs(CRON_BACKUPS_DIR, exist_ok=True)
     os.makedirs(AUDIO_BACKUPS_DIR, exist_ok=True)
     os.makedirs(AUDIO_DIR, exist_ok=True)
     
-    print("Бот запущен...")
-    bot.infinity_polling()
+    print("Бот запущен... Нажмите Ctrl+C для остановки")
+    
+    try:
+        while True:
+            try:
+                bot.infinity_polling(none_stop=True, timeout=60)
+            except Exception as e:
+                logging.error(f"Ошибка подключения: {str(e)}")
+                time.sleep(10)
+    except KeyboardInterrupt:
+        print("\nПолучен сигнал остановки. Завершаю работу...")
+        # Дополнительные действия при остановке (если нужны)
+        sys.exit(0)
