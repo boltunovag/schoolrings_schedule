@@ -1,6 +1,0 @@
-# Аудио расписание
-
-# Audio dir: /home/teacher/schollrings-schedule/audio_files
-
-11 14 * * 1-5 /usr/bin/mpg123 '/home/teacher/schollrings-schedule/audio_files/lesson_1_start_1750331387.mp3' >>/home/teacher/schollrings-schedule/audio_files/cron.log 2>&1
-13 14 * * 1-5 /usr/bin/mpg123 '/home/teacher/schollrings-schedule/audio_files/lesson_1_end_1750331404.mp3' >>/home/teacher/schollrings-schedule/audio_files/cron.log 2>&1

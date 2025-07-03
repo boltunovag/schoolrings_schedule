@@ -17,7 +17,7 @@ apt-get install -y \
 
 # Клонирование репозитория (или копирование файлов)
 if [ ! -d "/opt/schoolrings" ]; then
-  git clone https://github.com/ваш-репозиторий /opt/schoolrings
+  git clone https://github.com/boltunovag/schoolrings_schedule/opt/schoolrings
 else
   echo "Директория /opt/schoolrings уже существует. Обновляю..."
   cd /opt/schoolrings && git pull
@@ -26,9 +26,6 @@ fi
 # Установка Python-зависимостей
 pip3 install -r /opt/schoolrings/requirements.txt
 
-# Настройка cron
-echo "*/1 * * * * root /usr/bin/python3 /opt/schoolrings/SRS.py" > /etc/cron.d/schoolrings
-chmod 644 /etc/cron.d/schoolrings
 
 # Создание .env файла (если его нет)
 if [ ! -f "/opt/schoolrings/.env" ]; then
