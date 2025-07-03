@@ -8,8 +8,10 @@ import logging
 import re
 from datetime import datetime 
 import sys
-# --- Настройки ---
-load_dotenv()
+from pathlib import Path
+
+env_path = Path('.') / '.env'
+load_dotenv(dotenv_path=env_path)
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
@@ -27,14 +29,20 @@ os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(CRON_BACKUPS_DIR, exist_ok=True)
 os.makedirs(AUDIO_BACKUPS_DIR, exist_ok=True)
 
-# Добавляем в начало файла (после других констант)
-PASSWORD_FILE = "password.txt"
+
 MAX_ATTEMPTS = 3
 SESSION_TIMEOUT = 30 * 60  # 30 минут в секундах
 
 # Глобальные переменные для хранения состояния аутентификации
 authenticated_users = {}  # {chat_id: (timestamp, level)}
 
+
+print(f"TOKEN loaded: {'✅' if TOKEN else '❌'}")
+print(f"BOT_PASSWORD loaded: {'✅' if os.getenv('BOT_PASSWORD') else '❌'}")
+
+if not TOKEN:
+    logging.critical("TOKEN not loaded! Check .env file")
+    sys.exit(1)
 
 # --- Класс для событий ---
 class LessonEvent:
@@ -53,29 +61,28 @@ logging.basicConfig(
 )
 #--------------------Аутентификация----------------------------------->
 # Добавляем новые функции для работы с паролем
-def init_password():
-    """Инициализирует файл с паролем, если его нет"""
-    if not os.path.exists(PASSWORD_FILE):
-        with open(PASSWORD_FILE, 'w') as f:
-            f.write("admin123")  # Пароль по умолчанию
-        os.chmod(PASSWORD_FILE, 0o600)  # Доступ только владельцу
+
 
 def check_password(input_password):
-    """Проверяет введённый пароль"""
-    try:
-        with open(PASSWORD_FILE, 'r') as f:
-            correct_password = f.read().strip()
-        return input_password == correct_password
-    except Exception as e:
-        logging.error(f"Ошибка проверки пароля: {str(e)}")
+    """Проверяет пароль из переменных окружения"""
+    correct_password = os.getenv("BOT_PASSWORD")
+    if not correct_password:
+        logging.error("Пароль администратора не задан в .env")
         return False
+    return input_password == correct_password
 
 def change_password(new_password):
-    """Изменяет пароль"""
+    """Изменяет пароль в .env файле"""
     try:
-        with open(PASSWORD_FILE, 'w') as f:
-            f.write(new_password.strip())
-        os.chmod(PASSWORD_FILE, 0o600)
+        with open(".env", "r") as f:
+            lines = f.readlines()
+        
+        with open(".env", "w") as f:
+            for line in lines:
+                if line.startswith("BOT_PASSWORD="):
+                    f.write(f"BOT_PASSWORD={new_password}\n")
+                else:
+                    f.write(line)
         return True
     except Exception as e:
         logging.error(f"Ошибка изменения пароля: {str(e)}")
@@ -460,6 +467,7 @@ def change_password_command(message):
         "Введите новый пароль (не менее 8 символов):"
     )
     bot.register_next_step_handler(msg, process_new_password)
+#----------->
 def process_new_password(message):
     try:
         new_password = message.text.strip()
@@ -617,6 +625,7 @@ lesson_deletion_state = {}
 # Глобальный словарь для отслеживания состояния
 deletion_context = {}
 
+# Переделаем обработку удаления уроков с использованием состояния
 @bot.message_handler(commands=['remove_lessons'])
 @auth_required
 def handle_remove_lessons(message):
@@ -629,17 +638,17 @@ def handle_remove_lessons(message):
         lesson_numbers = sorted({int(e.lesson_num) for e in events})
         total = len(lesson_numbers)
         
-        # Сохраняем контекст удаления
-        deletion_context[message.chat.id] = {
-            'lessons': lesson_numbers,
-            'waiting_for_input': True
-        }
-        
         # Создаем клавиатуру
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
         buttons = [types.KeyboardButton(f"Удалить {i}") for i in range(1, min(total, 5)+1)]
         buttons.append(types.KeyboardButton("Отмена"))
         markup.add(*buttons)
+        
+        # Сохраняем состояние в глобальной переменной
+        deletion_context[message.chat.id] = {
+            'lessons': lesson_numbers,
+            'waiting_for_input': True
+        }
         
         bot.send_message(
             message.chat.id,
@@ -651,40 +660,41 @@ def handle_remove_lessons(message):
         logging.error(f"Ошибка в handle_remove_lessons: {str(e)}")
         bot.send_message(message.chat.id, "Ошибка при подготовке удаления")
 
-# Главный обработчик ВСЕХ текстовых сообщений
-@bot.message_handler(func=lambda m: True, content_types=['text'])
-def handle_all_messages(message):
+# Обработчик для кнопок удаления
+@bot.message_handler(func=lambda message: message.text.startswith('Удалить') or message.text == 'Отмена')
+def handle_deletion_buttons(message):
     try:
         chat_id = message.chat.id
         
-        # Проверяем, ожидаем ли мы ввод количества для удаления
-        if chat_id in deletion_context and deletion_context[chat_id]['waiting_for_input']:
+        if chat_id not in deletion_context or not deletion_context[chat_id]['waiting_for_input']:
+            return
             
-            if message.text == "Отмена":
-                del deletion_context[chat_id]
-                start(message)
-                return
-                
-            # Пытаемся извлечь число из сообщения
-            try:
-                count = int(message.text.split()[-1])  # "Удалить 1" -> 1
-            except:
-                bot.send_message(chat_id, "Пожалуйста, используйте кнопки")
-                return
-                
-            # Проверяем допустимость числа
-            max_lessons = len(deletion_context[chat_id]['lessons'])
-            if not 1 <= count <= min(max_lessons, 5):
-                bot.send_message(chat_id, f"Введите число от 1 до {min(max_lessons,5)}")
-                return
-                
-            # Вызываем функцию удаления
-            perform_lesson_deletion(chat_id, count)
-            del deletion_context[chat_id]  # Очищаем контекст
+        if message.text == "Отмена":
+            del deletion_context[chat_id]
+            markup = types.ReplyKeyboardRemove()
+            bot.send_message(chat_id, "Отменено", reply_markup=markup)
+            start(message)
+            return
+            
+        try:
+            count = int(message.text.split()[-1])  # "Удалить 1" -> 1
+        except:
+            bot.send_message(chat_id, "Пожалуйста, используйте кнопки")
+            return
+            
+        # Проверяем допустимость числа
+        max_lessons = len(deletion_context[chat_id]['lessons'])
+        if not 1 <= count <= min(max_lessons, 5):
+            bot.send_message(chat_id, f"Введите число от 1 до {min(max_lessons,5)}")
+            return
+            
+        # Вызываем функцию удаления
+        perform_lesson_deletion(chat_id, count)
             
     except Exception as e:
-        logging.error(f"Ошибка в handle_all_messages: {str(e)}")
+        logging.error(f"Ошибка в handle_deletion_buttons: {str(e)}")
 
+#------------------------------Конец удаления------------------------->
 def perform_lesson_deletion(chat_id, count):
     try:
         # Загружаем контекст
@@ -748,10 +758,62 @@ def settings_menu(message):
     )
 
 # Обработчики для меню настроек
+
 @bot.message_handler(func=lambda message: message.text == '1. Продолжительность урока')
 def set_lesson_duration(message):
+    if not is_authenticated(message.chat.id):
+        request_password(message)
+        return
+        
     msg = bot.send_message(message.chat.id, "Сколько минут длится урок? (Введите число от 1 до 120):")
     bot.register_next_step_handler(msg, process_lesson_duration)
+
+@bot.message_handler(func=lambda message: message.text == '2. Приостановить звонки')
+def pause_cron(message):
+    if not is_authenticated(message.chat.id):
+        request_password(message)
+        return
+        
+    try:
+        with open(CRON_BACKUP_FILE, 'w') as f:
+            f.write(os.popen("crontab -l").read())
+        os.system("crontab -r")
+        
+        settings = load_settings()
+        settings["cron_paused"] = True
+        save_settings(settings)
+        
+        bot.send_message(message.chat.id, "✅ Звонки приостановлены. Cron очищен.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+    finally:
+        settings_menu(message)
+
+@bot.message_handler(func=lambda message: message.text == '3. Запустить звонки')
+def resume_cron(message):
+    if not is_authenticated(message.chat.id):
+        request_password(message)
+        return
+        
+    try:
+        if os.path.exists(CRON_BACKUP_FILE):
+            os.system(f"crontab {CRON_BACKUP_FILE}")
+            status = "восстановлены"
+        else:
+            success, _ = install_cron_jobs()
+            status = "запущены (новые)" if success else "не удалось запустить"
+            
+        settings = load_settings()
+        settings["cron_paused"] = False
+        save_settings(settings)
+        
+        bot.send_message(message.chat.id, f"✅ Звонки {status}. Cron активирован.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+    finally:
+        settings_menu(message)
+
+
 
 def process_lesson_duration(message):
     try:
@@ -810,7 +872,6 @@ def resume_cron(message):
 # process_start_time, process_start_audio, process_end_time, 
 # process_end_audio остаются без изменений)
 current_lessons = {}  # Временное хранилище для уроков в процессе добавления
-
 
 @bot.message_handler(commands=['add_lesson'])
 @auth_required
@@ -1182,7 +1243,7 @@ def check_files(message):
         bot.send_message(message.chat.id, f"Ошибка проверки файлов: {str(e)}")
 #####################################ЗАПУСК№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№        
 if __name__ == "__main__":
-    init_password()
+
     os.makedirs(CRON_BACKUPS_DIR, exist_ok=True)
     os.makedirs(AUDIO_BACKUPS_DIR, exist_ok=True)
     os.makedirs(AUDIO_DIR, exist_ok=True)
