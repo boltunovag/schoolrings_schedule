@@ -220,20 +220,25 @@ def validate_lesson_times(new_lesson_num, new_start, new_end, existing_events):
         return False, f"⛔ Ошибка формата времени: {str(e)}"
 #---------------------------------------------------->
 def load_events():
-    """Загружает события из файла"""
     events = []
     if not os.path.exists(SCHEDULE_FILE):
+        logging.warning(f"Файл расписания не найден: {SCHEDULE_FILE}")
         return events
         
     try:
         with open(SCHEDULE_FILE, 'r') as f:
             for line in f:
-                parts = line.strip().split()
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
                 if len(parts) == 4:
                     event_type, lesson_num, time, audio_file = parts
                     events.append(LessonEvent(lesson_num, event_type, time, audio_file))
+                else:
+                    logging.warning(f"Некорректная строка в расписании: {line}")
     except Exception as e:
-        logging.error(f"Ошибка загрузки расписания: {str(e)}")
+        logging.error(f"Ошибка загрузки расписания: {str(e)}", exc_info=True)
     return events
 
     """Сохраняет события в файл и автоматически устанавливает cron"""
@@ -666,7 +671,14 @@ def handle_deletion_buttons(message):
     try:
         chat_id = message.chat.id
         
-        if chat_id not in deletion_context or not deletion_context[chat_id]['waiting_for_input']:
+@bot.message_handler(func=lambda message: message.text.startswith('Удалить') or message.text == 'Отмена')
+def handle_deletion_buttons(message):
+    try:
+        chat_id = message.chat.id
+        
+        # Проверяем, есть ли активное состояние удаления
+        if chat_id not in deletion_context or not deletion_context[chat_id].get('waiting_for_input', False):
+            bot.send_message(chat_id, "Нет активного процесса удаления. Начните заново с /remove_lessons")
             return
             
         if message.text == "Отмена":
@@ -697,41 +709,50 @@ def handle_deletion_buttons(message):
 #------------------------------Конец удаления------------------------->
 def perform_lesson_deletion(chat_id, count):
     try:
-        # Загружаем контекст
-        context = deletion_context.get(chat_id)
-        if not context:
-            bot.send_message(chat_id, "Сессия устарела, начните заново")
+        if chat_id not in deletion_context:
+            bot.send_message(chat_id, "Сессия устарела. Начните заново с /remove_lessons")
             return
-            
+
+        context = deletion_context[chat_id]
+        if 'lessons' not in context or not context['lessons']:
+            bot.send_message(chat_id, "Нет уроков для удаления.")
+            return
+
         lessons_to_delete = context['lessons'][-count:]
         events = load_events()
         
-        # Фильтруем события
-        remaining_events = [
-            e for e in events 
-            if int(e.lesson_num) not in lessons_to_delete
-        ]
+        if not events:
+            bot.send_message(chat_id, "Расписание пусто.")
+            return
+
+        remaining_events = [e for e in events if int(e.lesson_num) not in lessons_to_delete]
         
-        # Сохраняем изменения
-        if save_events(remaining_events):
-            # Удаляем файлы (добавьте свою логику удаления файлов)
-            bot.send_message(
-                chat_id,
-                f"Успешно удалено {count} уроков (номера: {lessons_to_delete})"
-            )
-            install_cron_jobs()  # Обновляем cron
-        else:
-            bot.send_message(chat_id, "Ошибка при сохранении изменений")
-            
+        if not save_events(remaining_events):
+            bot.send_message(chat_id, "Ошибка сохранения расписания.")
+            return
+
+        # Удаляем связанные аудиофайлы
+        for lesson_num in lessons_to_delete:
+            for event in events:
+                if event.lesson_num == str(lesson_num):
+                    file_path = os.path.join(AUDIO_DIR, event.audio_file)
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                    except Exception as e:
+                        logging.error(f"Ошибка удаления файла {file_path}: {str(e)}")
+
+        bot.send_message(chat_id, f"Удалено {count} уроков: {lessons_to_delete}")
+        install_cron_jobs()
+
     except Exception as e:
-        logging.error(f"Ошибка удаления: {str(e)}")
-        bot.send_message(chat_id, f"Ошибка при удалении: {str(e)}")
+        logging.error(f"Ошибка удаления: {str(e)}", exc_info=True)
+        bot.send_message(chat_id, f"Ошибка: {str(e)}")
     finally:
-        # Гарантированная очистка клавиатуры
-        markup = types.ReplyKeyboardRemove()
-        bot.send_message(chat_id, "Готово!", reply_markup=markup)
         if chat_id in deletion_context:
             del deletion_context[chat_id]
+        markup = types.ReplyKeyboardRemove()
+        bot.send_message(chat_id, "Готово!", reply_markup=markup)
 #-------------------------------Конец удаления уроков№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№
 @bot.message_handler(commands=['settings'])
 @auth_required
