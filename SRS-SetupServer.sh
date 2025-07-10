@@ -42,18 +42,17 @@ check_repo_access() {
     fi
     return 0
 }
-
-# Установка зависимостей
+#---------------------------------------------------------->
 install_dependencies() {
     echo -e "${YELLOW}Установка зависимостей...${NC}"
     
     if check_repo_access; then
         echo "Обновление системных пакетов..."
-        sudo dnf update -y
+        sudo /usr/bin/dnf update -y
         check_error "Не удалось обновить пакеты"
     fi
     
-    sudo dnf install -y \
+    sudo /usr/bin/dnf install -y \
         python3 \
         python3-pip \
         mpg123 \
@@ -65,7 +64,7 @@ install_dependencies() {
     # Настройка безопасного каталога для Git
     sudo git config --global --add safe.directory "$WORK_DIR"
 }
-
+#----------------------------------------------------------->
 # Настройка окружения
 setup_environment() {
     echo -e "${YELLOW}Настройка окружения...${NC}"
@@ -123,6 +122,7 @@ EOF
     sudo systemctl enable --now "$SERVICE_NAME.service"
     check_error "Не удалось запустить сервис"
 }
+#------------------------------------------------------------->
 
 # Основной процесс установки
 main() {
@@ -138,10 +138,12 @@ main() {
         check_error "Не удалось клонировать репозиторий"
     else
         echo "Директория $WORK_DIR уже существует. Обновляю..."
-        cd "$WORK_DIR" && sudo git pull
+        cd "$WORK_DIR" || exit 1
+        sudo git stash  # Сохраняем локальные изменения
+        sudo git pull
         check_error "Не удалось обновить репозиторий"
     fi
-    
+#---------------------------------------------------------------->    
     # Настройка прав
     sudo chown -R "$CURRENT_USER:$CURRENT_USER" "$WORK_DIR"
     sudo chmod -R 755 "$WORK_DIR"
