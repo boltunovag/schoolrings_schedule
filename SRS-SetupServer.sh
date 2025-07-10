@@ -70,8 +70,12 @@ sudo pip3 install -r /opt/schoolrings/requirements.txt
 
 # Создание .env файла
 if [ ! -f "/opt/schoolrings/.env" ]; then
-    cat | sudo tee /opt/schoolrings/.env <<EOF
-TELEGRAM_BOT_TOKEN=your_token_here
+  read -p "Enter Telegram token:" TToken
+  if [ -z "$TToken" ]; then
+    TToken="your_token_here"
+  fi
+  cat | sudo tee /opt/schoolrings/.env <<EOF
+TELEGRAM_BOT_TOKEN=$TToken
 BOT_PASSWORD=$(openssl rand -hex 16)
 AUDIO_DIR=/opt/schoolrings/audio_files
 SCHEDULE_FILE=/opt/schoolrings/data/schedule_files/schedule.txt
