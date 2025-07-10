@@ -665,12 +665,7 @@ def handle_remove_lessons(message):
         logging.error(f"Ошибка в handle_remove_lessons: {str(e)}")
         bot.send_message(message.chat.id, "Ошибка при подготовке удаления")
 
-# Обработчик для кнопок удаления
-@bot.message_handler(func=lambda message: message.text.startswith('Удалить') or message.text == 'Отмена')
-def handle_deletion_buttons(message):
-    try:
-        chat_id = message.chat.id
-        
+       
 @bot.message_handler(func=lambda message: message.text.startswith('Удалить') or message.text == 'Отмена')
 def handle_deletion_buttons(message):
     try:
