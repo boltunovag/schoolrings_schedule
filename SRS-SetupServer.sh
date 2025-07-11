@@ -41,8 +41,7 @@ install_dependencies() {
     echo "Обновление списка пакетов..."
     sudo dnf makecache
     check_error "Не удалось обновить кэш пакетов"
-    
-    
+     
     echo "Установка необходимых пакетов..."
     sudo dnf install -y \
         python3 \
