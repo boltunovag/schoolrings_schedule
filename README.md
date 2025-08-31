@@ -20,7 +20,7 @@
 
 Или используйте команду в терминале:
 ```bash
-wget https://github.com/boltunovag/schoolrings_schedule/releases/latest/download/SRS-SetupServer.sh
+wget https://github.com/boltunovag/schoolrings_schedule/releases/latest/download/SRS-SetupServer.sh 
 ```
 
 - Проверяем права файла на запуск и запускаем: ./SRS-SetupServer.sh*
