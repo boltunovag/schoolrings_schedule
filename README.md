@@ -15,7 +15,7 @@
 - Выбираем любой устаревший ноутбук для звонковой стстемы с исправным аакумулятором
 - Устанавливаем на ноутбук операционную систему Linux МOS12 или какую-то другую. Создавалось под MOS, под другими системами установка не тестировалась. 
 - Скачиваем установочный скрипт:
-⬇️ [Скачать основной скрипт SRS-SetupServer.sh*](https://raw.githubusercontent.com/boltunovag/schoolrings_schedule/refs/heads/main/SRS-SetupServer.sh)
+⬇️ [Скачать основной скрипт SRS-SetupServer.sh](https://raw.githubusercontent.com/boltunovag/schoolrings_schedule/main/SRS-SetupServer.sh?download=SRS-SetupServer.sh)
 - Проверяем права файла на запуск и запускаем: ./SRS-SetupServer.sh*
 - В процессе должен быть запрошен токен бота.Копируем, вставляем. Если запроса не будет, то добавляем токен редактируя: /opt/schoolrings/.env (Скрытый файл), там же забираем сгенерируем пароль. Пароль можно изменить на свой.
 - Перезапускаем сервис: sudo systemctl restart schoolrings. Проверяем его статус: systemctl status schoolrings.
